@@ -1,0 +1,25 @@
+name: Unzip Flashlight Strobe
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  unzip-folder:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Unzip folder to Home Directory
+        run: |
+          # Ensure the file exists before unzipping
+          if [ -f "flashlight-strobe-github.zip" ]; then
+            unzip flashlight-strobe-github.zip -d $HOME
+            echo "Successfully unzipped flashlight-strobe-github.zip to $HOME"
+          else
+            echo "Error: flashlight-strobe-github.zip not found in the repository root!"
+            exit 1
+          fi
