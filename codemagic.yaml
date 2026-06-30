@@ -54,11 +54,17 @@ workflows:
             -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
           echo "Running prebuild in: $APP_DIR"
           
-          # Force navigate into the actual app directory
           cd "$APP_DIR"
-          if [ -f "node_modules/.bin/expo" ]; then
-            node_modules/.bin/expo prebuild --platform android --clean --no-install
+          
+          # Explicitly add the local node_modules bin to the PATH so npx can find expo
+          export PATH="$PWD/node_modules/.bin:$PATH"
+          
+          # Run prebuild using the explicit local binary package
+          if [ -f "./node_modules/.bin/expo" ]; then
+            ./node_modules/.bin/expo prebuild --platform android --clean --no-install
           else
+            # If it still isn't found, force-install expo globally just for the CLI runner
+            npm install -g expo-cli
             npx expo prebuild --platform android --clean --no-install
           fi
 
