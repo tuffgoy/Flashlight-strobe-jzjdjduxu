@@ -7,6 +7,8 @@ workflows:
       groups:
         - SUPABASE
         - CM
+      vars:
+        COREPACK_ENABLE_STRICT: "0"
     cache:
       cache_paths:
         - ~/.gradle/caches
