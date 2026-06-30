@@ -40,30 +40,26 @@ workflows:
 
       - name: Install JS dependencies
         script: |
-          # Find the Expo app directory (contains app.json with "expo" key)
           APP_DIR=$(find . -maxdepth 4 -name "app.json" \
             -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
           echo "Expo app found at: $APP_DIR"
-          # Install from workspace root if workspace file exists, else from app dir
-          if [ -f "pnpm-workspace.yaml" ]; then
-            pnpm install --no-frozen-lockfile
-          else
-            cd "$APP_DIR" && pnpm install --no-frozen-lockfile
-          fi
+          
+          # Force navigate into the actual app directory
+          cd "$APP_DIR"
+          pnpm install --no-frozen-lockfile
 
       - name: Expo prebuild (generate Android project)
         script: |
           APP_DIR=$(find . -maxdepth 4 -name "app.json" \
             -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
           echo "Running prebuild in: $APP_DIR"
+          
+          # Force navigate into the actual app directory
           cd "$APP_DIR"
-          # Use locally installed expo, fall back to npx if not found
           if [ -f "node_modules/.bin/expo" ]; then
             node_modules/.bin/expo prebuild --platform android --clean --no-install
-          elif [ -f "../node_modules/.bin/expo" ]; then
-            ../node_modules/.bin/expo prebuild --platform android --clean --no-install
           else
-            npx expo prebuild --platform android --clean
+            npx expo prebuild --platform android --clean --no-install
           fi
 
       - name: Set Android SDK path
