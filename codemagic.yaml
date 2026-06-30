@@ -1,0 +1,188 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  Codemagic CI/CD — Flashlight Strobe Android APK
+#
+#  Workflow:  android-apk
+#  Trigger:   Push to main / manual
+#  Output:    Signed release APK uploaded to Supabase Storage
+#
+#  Required Codemagic environment variables
+#  ─────────────────────────────────────────
+#  SUPABASE_URL    – Supabase project URL  (e.g. https://xyz.supabase.co)
+#  SUPABASE_KEY    – service_role key with Storage write access
+#  SUPABASE_BUCKET – storage bucket name  (e.g. "apks")
+#
+#  For a signed release APK, also add:
+#  CM_KEYSTORE          – base64-encoded .jks keystore
+#  CM_KEYSTORE_PASSWORD – keystore password
+#  CM_KEY_ALIAS         – key alias
+#  CM_KEY_PASSWORD      – key password
+#
+#  Without keystore vars the workflow falls back to an unsigned debug APK.
+# ─────────────────────────────────────────────────────────────────────────────
+
+workflows:
+  android-apk:
+    name: Android Release APK
+    max_build_duration: 90
+    triggering:
+      events:
+        - push
+      branch_patterns:
+        - pattern: main
+          include: true
+    environment:
+      node: 20.17.0
+      vars:
+        EXPO_PUBLIC_DOMAIN: ""   # Override with your Replit/production domain if needed
+    cache:
+      cache_paths:
+        - $HOME/.cache/pnpm
+        - artifacts/flashlight-strobe/node_modules
+
+    scripts:
+      # ── 1. Toolchain ──────────────────────────────────────────────────────
+      - name: Install pnpm
+        script: |
+          npm install -g pnpm@9
+          pnpm --version
+
+      # ── 2. Dependencies ───────────────────────────────────────────────────
+      - name: Install workspace dependencies
+        script: |
+          pnpm install --frozen-lockfile
+
+      # ── 3. Generate native Android project ────────────────────────────────
+      - name: Expo prebuild — generate Android native project
+        script: |
+          cd artifacts/flashlight-strobe
+          npx expo prebuild --platform android --clean --no-install
+
+      # ── 4. Configure release signing (if keystore is provided) ────────────
+      - name: Configure release keystore
+        script: |
+          ANDROID_DIR="artifacts/flashlight-strobe/android"
+          APP_GRADLE="$ANDROID_DIR/app/build.gradle"
+
+          if [ -z "$CM_KEYSTORE" ]; then
+            echo "No keystore provided — will build unsigned debug APK."
+            exit 0
+          fi
+
+          echo "Decoding keystore..."
+          echo "$CM_KEYSTORE" | base64 --decode > "$ANDROID_DIR/app/release.keystore"
+
+          # Append keystore properties to gradle.properties (safe to append multiple times)
+          cat >> "$ANDROID_DIR/gradle.properties" << EOF
+          MYAPP_RELEASE_STORE_FILE=release.keystore
+          MYAPP_RELEASE_KEY_ALIAS=${CM_KEY_ALIAS}
+          MYAPP_RELEASE_STORE_PASSWORD=${CM_KEYSTORE_PASSWORD}
+          MYAPP_RELEASE_KEY_PASSWORD=${CM_KEY_PASSWORD}
+          EOF
+
+          # ── Patch app/build.gradle to add release signingConfig ────────────
+          # Step 1: inject the release signingConfig block after `signingConfigs {`
+          node - << 'NODE_EOF'
+          const fs = require('fs');
+          const path = process.argv[1];
+          const file = process.env.APP_GRADLE;
+          let src = fs.readFileSync(file, 'utf8');
+
+          const RELEASE_SIGNING = `
+              release {
+                  storeFile file(MYAPP_RELEASE_STORE_FILE)
+                  storePassword MYAPP_RELEASE_STORE_PASSWORD
+                  keyAlias MYAPP_RELEASE_KEY_ALIAS
+                  keyPassword MYAPP_RELEASE_KEY_PASSWORD
+              }`;
+
+          // Only inject if not already present
+          if (!src.includes('MYAPP_RELEASE_STORE_FILE')) {
+            src = src.replace(
+              /signingConfigs\s*\{/,
+              `signingConfigs {${RELEASE_SIGNING}`
+            );
+          }
+
+          // Step 2: wire release buildType to the release signingConfig
+          src = src.replace(
+            /signingConfig signingConfigs\.debug/g,
+            'signingConfig signingConfigs.release'
+          );
+
+          fs.writeFileSync(file, src);
+          console.log('build.gradle patched for release signing.');
+          NODE_EOF
+        env:
+          APP_GRADLE: artifacts/flashlight-strobe/android/app/build.gradle
+
+      # ── 5. Build ──────────────────────────────────────────────────────────
+      - name: Build APK
+        script: |
+          cd artifacts/flashlight-strobe/android
+          chmod +x ./gradlew
+          if [ -n "$CM_KEYSTORE" ]; then
+            echo "Building signed release APK..."
+            ./gradlew assembleRelease
+          else
+            echo "Building unsigned debug APK..."
+            ./gradlew assembleDebug
+          fi
+
+    # ── Artifacts ─────────────────────────────────────────────────────────
+    artifacts:
+      - artifacts/flashlight-strobe/android/app/build/outputs/apk/**/*.apk
+
+    # ── Post-build: upload to Supabase Storage ────────────────────────────
+    publishing:
+      scripts:
+        - name: Upload APK to Supabase Storage
+          script: |
+            #!/usr/bin/env bash
+            set -e
+
+            if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_KEY" ] || [ -z "$SUPABASE_BUCKET" ]; then
+              echo "⚠️  SUPABASE_URL / SUPABASE_KEY / SUPABASE_BUCKET not set — skipping upload."
+              exit 0
+            fi
+
+            APK=$(find artifacts/flashlight-strobe/android/app/build/outputs/apk -name "*.apk" | head -1)
+            if [ -z "$APK" ]; then
+              echo "ERROR: No APK found!"
+              exit 1
+            fi
+
+            VERSION=$(node -e "console.log(require('./artifacts/flashlight-strobe/app.json').expo.version)")
+            TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+            VERSIONED="flashlight-strobe-v${VERSION}-${TIMESTAMP}.apk"
+            LATEST="flashlight-strobe-latest.apk"
+
+            # Helper: upload with upsert=true so subsequent builds overwrite cleanly
+            upload_apk() {
+              local DEST_NAME=$1
+              echo "Uploading → $DEST_NAME"
+              HTTP_CODE=$(curl -fsSL -o /dev/null -w "%{http_code}" \
+                -X POST \
+                "${SUPABASE_URL}/storage/v1/object/${SUPABASE_BUCKET}/${DEST_NAME}?upsert=true" \
+                -H "Authorization: Bearer ${SUPABASE_KEY}" \
+                -H "Content-Type: application/octet-stream" \
+                -H "x-upsert: true" \
+                --data-binary @"${APK}")
+              if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+                echo "✅  $DEST_NAME uploaded (HTTP $HTTP_CODE)"
+              else
+                echo "❌  Upload failed for $DEST_NAME (HTTP $HTTP_CODE)"
+                exit 1
+              fi
+            }
+
+            upload_apk "$VERSIONED"
+            upload_apk "$LATEST"
+
+            echo ""
+            echo "🚀  APK available at:"
+            echo "    Latest:    ${SUPABASE_URL}/storage/v1/object/public/${SUPABASE_BUCKET}/${LATEST}"
+            echo "    Versioned: ${SUPABASE_URL}/storage/v1/object/public/${SUPABASE_BUCKET}/${VERSIONED}"
+            echo ""
+            echo "Next: update your remote config JSON:"
+            echo "  { \"latestApkVersion\": \"${VERSION}\","
+            echo "    \"apkDownloadUrl\": \"${SUPABASE_URL}/storage/v1/object/public/${SUPABASE_BUCKET}/${LATEST}\" }"
