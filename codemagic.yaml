@@ -33,7 +33,7 @@ workflows:
 
       - name: Install JS dependencies
         script: |
-          pnpm install --frozen-lockfile
+          pnpm install --no-frozen-lockfile
 
       - name: Expo prebuild (generate Android project)
         script: |
