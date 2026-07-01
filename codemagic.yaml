@@ -49,67 +49,59 @@ workflows:
           echo "Expo app found at: $APP_ABS"
 
           WORKSPACE_YAML=$(find . -maxdepth 5 -name "pnpm-workspace.yaml" 2>/dev/null | head -1)
+          if [ -z "$WORKSPACE_YAML" ]; then
+            echo "ERROR: no pnpm-workspace.yaml found. This package.json uses"
+            echo "'catalog:' / 'workspace:*' specifiers which require one."
+            exit 1
+          fi
+
           WORKSPACE_ROOT=$(dirname "$WORKSPACE_YAML")
           WORKSPACE_ABS=$(cd "$WORKSPACE_ROOT" && pwd)
           echo "Found pnpm workspace root at: $WORKSPACE_ABS"
+          echo "--- pnpm-workspace.yaml (before) ---"
+          cat "$WORKSPACE_YAML"
+
+          # Ask pnpm which directories it currently recognizes as workspace
+          # members. If the app folder isn't among them, its deps (including
+          # expo) are invisible to install no matter how many times we run it.
+          RECOGNIZED=$(cd "$WORKSPACE_ABS" && pnpm -r exec -- pwd 2>/dev/null || true)
+          echo "--- Workspace packages pnpm currently recognizes ---"
+          echo "$RECOGNIZED"
+
+          if ! echo "$RECOGNIZED" | grep -qF "$APP_ABS"; then
+            echo "App folder is NOT a recognized pnpm workspace member. Patching pnpm-workspace.yaml..."
+            if grep -q '^packages:' "$WORKSPACE_YAML"; then
+              awk '{print} /^packages:/ && !done {print "  - \"*\""; print "  - \"packages/*\""; print "  - \"apps/*\""; done=1}' \
+                "$WORKSPACE_YAML" > "$WORKSPACE_YAML.tmp"
+            else
+              { printf 'packages:\n  - "*"\n  - "packages/*"\n  - "apps/*"\n'; cat "$WORKSPACE_YAML"; } \
+                > "$WORKSPACE_YAML.tmp"
+            fi
+            mv "$WORKSPACE_YAML.tmp" "$WORKSPACE_YAML"
+            echo "--- pnpm-workspace.yaml (after patch) ---"
+            cat "$WORKSPACE_YAML"
+          fi
 
           cd "$WORKSPACE_ABS"
           pnpm install --no-frozen-lockfile
 
-          echo "=== Verifying expo was installed ==="
-          if [ ! -e "$APP_ABS/node_modules/.bin/expo" ] && [ ! -e "$WORKSPACE_ABS/node_modules/.bin/expo" ]; then
-            echo "ERROR: expo binary not found in app or workspace node_modules"
+          echo "=== Verifying expo was installed in the app package ==="
+          cd "$APP_ABS"
+
+          if ! pnpm list expo --depth 0 2>/dev/null | grep -q expo; then
+            echo "ERROR: 'expo' still did not resolve into $APP_ABS/node_modules."
+            echo "--- Workspace packages pnpm recognizes now ---"
+            cd "$WORKSPACE_ABS" && pnpm -r exec -- pwd 2>/dev/null || true
             exit 1
           fi
-          echo "Dependencies installed successfully"
 
-      - name: Patch metro.config.js for pnpm workspace
-        script: |
-          set -e
-          APP_DIR=$(find . -maxdepth 4 -name "app.json" \
-            -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
-          APP_ABS=$(cd "$APP_DIR" && pwd)
+          if [ ! -e "./node_modules/.bin/expo" ]; then
+            echo "ERROR: expo resolved but node_modules/.bin/expo was not created."
+            ls -la node_modules/.bin | head -50
+            exit 1
+          fi
 
-          WORKSPACE_YAML=$(find . -maxdepth 5 -name "pnpm-workspace.yaml" 2>/dev/null | head -1)
-          WORKSPACE_ABS=$(cd "$(dirname "$WORKSPACE_YAML")" && pwd)
-
-          METRO_CONFIG="$APP_ABS/metro.config.js"
-          echo "Writing pnpm-aware metro.config.js to $METRO_CONFIG"
-
-          node -e '
-            var fs = require("fs");
-            var path = require("path");
-            var appAbs = process.env.APP_ABS;
-            var workspaceAbs = process.env.WORKSPACE_ABS;
-            var config = [
-              "const { getDefaultConfig } = require(\"expo/metro-config\");",
-              "const path = require(\"path\");",
-              "",
-              "const projectRoot = __dirname;",
-              "const workspaceRoot = " + JSON.stringify(workspaceAbs) + ";",
-              "",
-              "const config = getDefaultConfig(projectRoot);",
-              "",
-              "// Tell Metro to watch the pnpm workspace root so it can find",
-              "// packages hoisted there instead of in the app node_modules.",
-              "config.watchFolders = [workspaceRoot];",
-              "",
-              "config.resolver.nodeModulesPaths = [",
-              "  path.resolve(projectRoot, \"node_modules\"),",
-              "  path.resolve(workspaceRoot, \"node_modules\"),",
-              "];",
-              "",
-              "// pnpm uses symlinks; enable symlink resolution in Metro.",
-              "config.resolver.unstable_enableSymlinks = true;",
-              "",
-              "module.exports = config;",
-            ].join("\n");
-            fs.writeFileSync(path.join(appAbs, "metro.config.js"), config);
-            console.log("metro.config.js written");
-          ' APP_ABS="$APP_ABS" WORKSPACE_ABS="$WORKSPACE_ABS"
-
-          echo "--- metro.config.js ---"
-          cat "$METRO_CONFIG"
+          echo "expo binary confirmed at $(pwd)/node_modules/.bin/expo"
 
       - name: Expo prebuild (generate Android project)
         script: |
@@ -117,7 +109,13 @@ workflows:
           APP_DIR=$(find . -maxdepth 4 -name "app.json" \
             -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
           echo "Running prebuild in: $APP_DIR"
+
           cd "$APP_DIR"
+
+          # Use pnpm's own resolution instead of a manual node_modules/.bin check.
+          # This never falls back to the legacy global expo-cli, which is
+          # deprecated, incompatible with Node 17+, and was masking the real
+          # "expo not installed" error in earlier build logs.
           pnpm exec expo prebuild --platform android --clean --no-install
 
       - name: Set Android SDK path
@@ -128,50 +126,78 @@ workflows:
 
       - name: Configure release keystore
         script: |
-          set -e
           APP_DIR=$(find . -maxdepth 4 -name "app.json" \
             -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
           ANDROID_DIR="$APP_DIR/android"
           APP_GRADLE="$ANDROID_DIR/app/build.gradle"
 
-          if [ -z "$CM_KEYSTORE" ]; then
-            echo "No keystore — will build debug APK"
-            exit 0
-          fi
-
+          echo "Decoding keystore into $ANDROID_DIR/app/release.keystore"
           echo "$CM_KEYSTORE" | base64 --decode > "$ANDROID_DIR/app/release.keystore"
 
-          printf 'MYAPP_RELEASE_STORE_FILE=release.keystore\n' >> "$ANDROID_DIR/gradle.properties"
-          printf 'MYAPP_RELEASE_KEY_ALIAS=%s\n' "$CM_KEY_ALIAS" >> "$ANDROID_DIR/gradle.properties"
-          printf 'MYAPP_RELEASE_STORE_PASSWORD=%s\n' "$CM_KEYSTORE_PASSWORD" >> "$ANDROID_DIR/gradle.properties"
-          printf 'MYAPP_RELEASE_KEY_PASSWORD=%s\n' "$CM_KEY_PASSWORD" >> "$ANDROID_DIR/gradle.properties"
+          cat >> "$ANDROID_DIR/gradle.properties" << PROPS
+          MYAPP_RELEASE_STORE_FILE=release.keystore
+          MYAPP_RELEASE_KEY_ALIAS=${CM_KEY_ALIAS}
+          MYAPP_RELEASE_STORE_PASSWORD=${CM_KEYSTORE_PASSWORD}
+          MYAPP_RELEASE_KEY_PASSWORD=${CM_KEY_PASSWORD}
+          PROPS
 
-          export APP_GRADLE
-          node -e '
-            var fs = require("fs");
-            var f = process.env.APP_GRADLE;
-            var s = fs.readFileSync(f, "utf8");
-            var block = "\n        release {\n            storeFile file(MYAPP_RELEASE_STORE_FILE)\n            storePassword MYAPP_RELEASE_STORE_PASSWORD\n            keyAlias MYAPP_RELEASE_KEY_ALIAS\n            keyPassword MYAPP_RELEASE_KEY_PASSWORD\n        }";
-            if (s.indexOf("MYAPP_RELEASE_STORE_FILE") === -1) {
-              s = s.replace(/signingConfigs\s*\{/, "signingConfigs {" + block);
+          node -e "
+            const fs = require('fs');
+            const file = '$APP_GRADLE';
+            let src = fs.readFileSync(file, 'utf8');
+            const block = \`
+              release {
+                  storeFile file(MYAPP_RELEASE_STORE_FILE)
+                  storePassword MYAPP_RELEASE_STORE_PASSWORD
+                  keyAlias MYAPP_RELEASE_KEY_ALIAS
+                  keyPassword MYAPP_RELEASE_KEY_PASSWORD
+              }\`;
+            if (!src.includes('MYAPP_RELEASE_STORE_FILE')) {
+              src = src.replace(/signingConfigs\s*\{/, 'signingConfigs {' + block);
             }
-            s = s.replace(/signingConfig signingConfigs\.debug/g, "signingConfig signingConfigs.release");
-            fs.writeFileSync(f, s);
-            console.log("build.gradle patched");
-          '
+            src = src.replace(/signingConfig signingConfigs\.debug/g, 'signingConfig signingConfigs.release');
+            fs.writeFileSync(file, src);
+            console.log('build.gradle patched.');
+          "
 
       - name: Build release APK
         script: |
           set -e
           APP_DIR=$(find . -maxdepth 4 -name "app.json" \
             -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
-          cd "$APP_DIR/android"
+          APP_ABS=$(cd "$APP_DIR" && pwd)
+
+          WORKSPACE_YAML=$(find . -maxdepth 5 -name "pnpm-workspace.yaml" 2>/dev/null | head -1)
+          WORKSPACE_ABS=$(cd "$(dirname "$WORKSPACE_YAML")" && pwd)
+
+          # pnpm hoists packages to the workspace root. Metro only looks in the
+          # app's own node_modules by default, so it cannot resolve those hoisted
+          # packages and createBundleReleaseJsAndAssets exits with code 1.
+          # Writing a metro.config.js that adds watchFolders + nodeModulesPaths
+          # pointing at the workspace root fixes this without touching the repo.
+          cat > "$APP_ABS/metro.config.js" << 'METRO'
+          const { getDefaultConfig } = require('expo/metro-config');
+          const path = require('path');
+          const projectRoot = __dirname;
+          METRO
+          echo "const workspaceRoot = '${WORKSPACE_ABS}';" >> "$APP_ABS/metro.config.js"
+          cat >> "$APP_ABS/metro.config.js" << 'METRO'
+          const config = getDefaultConfig(projectRoot);
+          config.watchFolders = [workspaceRoot];
+          config.resolver.nodeModulesPaths = [
+            path.resolve(projectRoot, 'node_modules'),
+            path.resolve(workspaceRoot, 'node_modules'),
+          ];
+          config.resolver.unstable_enableSymlinks = true;
+          module.exports = config;
+          METRO
+
+          echo "--- metro.config.js ---"
+          cat "$APP_ABS/metro.config.js"
+
+          cd "$APP_ABS/android"
           chmod +x ./gradlew
-          if [ -n "$CM_KEYSTORE" ]; then
-            ./gradlew assembleRelease --no-daemon --stacktrace 2>&1 | tail -100
-          else
-            ./gradlew assembleDebug --no-daemon --stacktrace 2>&1 | tail -100
-          fi
+          ./gradlew assembleRelease --no-daemon
 
     artifacts:
       - "**/app/build/outputs/apk/**/*.apk"
@@ -190,7 +216,6 @@ workflows:
             APK=$(find . -path "*/app/build/outputs/apk/*.apk" -o \
                          -path "*/app/build/outputs/apk/**/*.apk" 2>/dev/null | head -1)
             if [ -z "$APK" ]; then echo "No APK found!"; exit 1; fi
-            echo "Found APK: $APK"
 
             APP_JSON=$(find . -maxdepth 4 -name "app.json" \
               -exec grep -l '"expo"' {} \; 2>/dev/null | head -1)
