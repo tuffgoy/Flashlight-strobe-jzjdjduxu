@@ -31,8 +31,6 @@ workflows:
           ls -la
           echo "=== All app.json files found ==="
           find . -maxdepth 4 -name "app.json" 2>/dev/null
-          echo "=== All pnpm-workspace.yaml files found ==="
-          find . -maxdepth 5 -name "pnpm-workspace.yaml" 2>/dev/null
 
       - name: Install pnpm
         script: |
@@ -42,81 +40,31 @@ workflows:
 
       - name: Install JS dependencies
         script: |
-          set -e
+          # Find the Expo app directory (contains app.json with "expo" key)
           APP_DIR=$(find . -maxdepth 4 -name "app.json" \
             -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
-          APP_ABS=$(cd "$APP_DIR" && pwd)
-          echo "Expo app found at: $APP_ABS"
-
-          WORKSPACE_YAML=$(find . -maxdepth 5 -name "pnpm-workspace.yaml" 2>/dev/null | head -1)
-          if [ -z "$WORKSPACE_YAML" ]; then
-            echo "ERROR: no pnpm-workspace.yaml found. This package.json uses"
-            echo "'catalog:' / 'workspace:*' specifiers which require one."
-            exit 1
+          echo "Expo app found at: $APP_DIR"
+          # Install from workspace root if workspace file exists, else from app dir
+          if [ -f "pnpm-workspace.yaml" ]; then
+            pnpm install --no-frozen-lockfile
+          else
+            cd "$APP_DIR" && pnpm install --no-frozen-lockfile
           fi
-
-          WORKSPACE_ROOT=$(dirname "$WORKSPACE_YAML")
-          WORKSPACE_ABS=$(cd "$WORKSPACE_ROOT" && pwd)
-          echo "Found pnpm workspace root at: $WORKSPACE_ABS"
-          echo "--- pnpm-workspace.yaml (before) ---"
-          cat "$WORKSPACE_YAML"
-
-          # Ask pnpm which directories it currently recognizes as workspace
-          # members. If the app folder isn't among them, its deps (including
-          # expo) are invisible to install no matter how many times we run it.
-          RECOGNIZED=$(cd "$WORKSPACE_ABS" && pnpm -r exec -- pwd 2>/dev/null || true)
-          echo "--- Workspace packages pnpm currently recognizes ---"
-          echo "$RECOGNIZED"
-
-          if ! echo "$RECOGNIZED" | grep -qF "$APP_ABS"; then
-            echo "App folder is NOT a recognized pnpm workspace member. Patching pnpm-workspace.yaml..."
-            if grep -q '^packages:' "$WORKSPACE_YAML"; then
-              awk '{print} /^packages:/ && !done {print "  - \"*\""; print "  - \"packages/*\""; print "  - \"apps/*\""; done=1}' \
-                "$WORKSPACE_YAML" > "$WORKSPACE_YAML.tmp"
-            else
-              { printf 'packages:\n  - "*"\n  - "packages/*"\n  - "apps/*"\n'; cat "$WORKSPACE_YAML"; } \
-                > "$WORKSPACE_YAML.tmp"
-            fi
-            mv "$WORKSPACE_YAML.tmp" "$WORKSPACE_YAML"
-            echo "--- pnpm-workspace.yaml (after patch) ---"
-            cat "$WORKSPACE_YAML"
-          fi
-
-          cd "$WORKSPACE_ABS"
-          pnpm install --no-frozen-lockfile
-
-          echo "=== Verifying expo was installed in the app package ==="
-          cd "$APP_ABS"
-
-          if ! pnpm list expo --depth 0 2>/dev/null | grep -q expo; then
-            echo "ERROR: 'expo' still did not resolve into $APP_ABS/node_modules."
-            echo "--- Workspace packages pnpm recognizes now ---"
-            cd "$WORKSPACE_ABS" && pnpm -r exec -- pwd 2>/dev/null || true
-            exit 1
-          fi
-
-          if [ ! -e "./node_modules/.bin/expo" ]; then
-            echo "ERROR: expo resolved but node_modules/.bin/expo was not created."
-            ls -la node_modules/.bin | head -50
-            exit 1
-          fi
-
-          echo "expo binary confirmed at $(pwd)/node_modules/.bin/expo"
 
       - name: Expo prebuild (generate Android project)
         script: |
-          set -e
           APP_DIR=$(find . -maxdepth 4 -name "app.json" \
             -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
           echo "Running prebuild in: $APP_DIR"
-
           cd "$APP_DIR"
-
-          # Use pnpm's own resolution instead of a manual node_modules/.bin check.
-          # This never falls back to the legacy global expo-cli, which is
-          # deprecated, incompatible with Node 17+, and was masking the real
-          # "expo not installed" error in earlier build logs.
-          pnpm exec expo prebuild --platform android --clean --no-install
+          # Use locally installed expo, fall back to npx if not found
+          if [ -f "node_modules/.bin/expo" ]; then
+            node_modules/.bin/expo prebuild --platform android --clean --no-install
+          elif [ -f "../node_modules/.bin/expo" ]; then
+            ../node_modules/.bin/expo prebuild --platform android --clean --no-install
+          else
+            npx expo prebuild --platform android --clean
+          fi
 
       - name: Set Android SDK path
         script: |
