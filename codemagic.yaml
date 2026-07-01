@@ -2,6 +2,7 @@ workflows:
   android-apk:
     name: Flashlight Strobe - Release APK
     max_build_duration: 90
+
     environment:
       java: 17
       groups:
@@ -26,10 +27,8 @@ workflows:
         script: |
           echo "=== pwd ===" && pwd
           echo "=== root ===" && ls -la
-          echo "=== app.json locations ==="
           find . -maxdepth 6 -name "app.json" 2>/dev/null
-          echo "=== package.json locations ==="
-          find . -maxdepth 6 -name "package.json" 2>/dev/null | grep -v node_modules
+          find . -maxdepth 6 -name "package.json" 2>/dev/null | grep -v node_modules || true
 
       - name: Install JS dependencies
         script: |
@@ -39,26 +38,14 @@ workflows:
           APP_DIR=$(find . -maxdepth 6 -name "app.json" -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
           echo "App dir: $APP_DIR"
           cd "$APP_DIR"
-          echo "--- npm install ---"
           pnpm install --no-frozen-lockfile
-          echo "--- installed expo version ---"
-          cat node_modules/expo/package.json | grep '"version"' | head -1
-          
-      - name: Expo prebuild (generate Android project)
+
+      - name: Expo prebuild
         script: |
           set -e
           APP_DIR=$(find . -maxdepth 6 -name "app.json" -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
-          echo "App dir: $APP_DIR"
           cd "$APP_DIR"
           npx expo prebuild --platform android --clean --no-install
-
-      - name: Set Android SDK path
-        script: |
-          set -e
-          APP_DIR=$(find . -maxdepth 6 -name "app.json" -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
-          echo "sdk.dir=$ANDROID_SDK_ROOT" > "$APP_DIR/android/local.properties"
-          echo "Wrote local.properties:"
-          cat "$APP_DIR/android/local.properties"
 
       - name: Configure release keystore
         script: |
@@ -67,35 +54,43 @@ workflows:
           ANDROID_DIR="$APP_DIR/android"
           APP_GRADLE="$ANDROID_DIR/app/build.gradle"
 
-          echo "Decoding keystore..."
           echo "$CM_KEYSTORE" | base64 --decode > "$ANDROID_DIR/app/release.keystore"
-          ls -lh "$ANDROID_DIR/app/release.keystore"
 
           cat >> "$ANDROID_DIR/gradle.properties" << PROPS
-          MYAPP_RELEASE_STORE_FILE=release.keystore
-          MYAPP_RELEASE_KEY_ALIAS=${CM_KEY_ALIAS}
-          MYAPP_RELEASE_STORE_PASSWORD=${CM_KEYSTORE_PASSWORD}
-          MYAPP_RELEASE_KEY_PASSWORD=${CM_KEY_PASSWORD}
-          PROPS
+MYAPP_RELEASE_STORE_FILE=release.keystore
+MYAPP_RELEASE_KEY_ALIAS=${CM_KEY_ALIAS}
+MYAPP_RELEASE_STORE_PASSWORD=${CM_KEYSTORE_PASSWORD}
+MYAPP_RELEASE_KEY_PASSWORD=${CM_KEY_PASSWORD}
+PROPS
 
-          node -e "
-            const fs = require('fs');
-            const file = '$APP_GRADLE';
-            let src = fs.readFileSync(file, 'utf8');
-            const block = \`
-              release {
-                  storeFile file(MYAPP_RELEASE_STORE_FILE)
-                  storePassword MYAPP_RELEASE_STORE_PASSWORD
-                  keyAlias MYAPP_RELEASE_KEY_ALIAS
-                  keyPassword MYAPP_RELEASE_KEY_PASSWORD
-              }\`;
-            if (!src.includes('MYAPP_RELEASE_STORE_FILE')) {
-              src = src.replace(/signingConfigs\s*\{/, 'signingConfigs {' + block);
-            }
-            src = src.replace(/signingConfig signingConfigs\.debug/g, 'signingConfig signingConfigs.release');
-            fs.writeFileSync(file, src);
-            console.log('build.gradle patched.');
-          "
+          export APP_GRADLE
+
+          node <<'NODE'
+const fs = require('fs');
+
+const file = process.env.APP_GRADLE;
+let src = fs.readFileSync(file, 'utf8');
+
+const block = `
+release {
+    storeFile file(MYAPP_RELEASE_STORE_FILE)
+    storePassword MYAPP_RELEASE_STORE_PASSWORD
+    keyAlias MYAPP_RELEASE_KEY_ALIAS
+    keyPassword MYAPP_RELEASE_KEY_PASSWORD
+}
+`;
+
+if (!src.includes('MYAPP_RELEASE_STORE_FILE')) {
+  src = src.replace(/signingConfigs\s*\{/, 'signingConfigs {' + block);
+}
+
+src = src.replace(
+  /signingConfig signingConfigs\.debug/g,
+  'signingConfig signingConfigs.release'
+);
+
+fs.writeFileSync(file, src);
+NODE
 
       - name: Build release APK
         script: |
@@ -107,51 +102,3 @@ workflows:
 
     artifacts:
       - "**/app/build/outputs/apk/**/*.apk"
-
-    publishing:
-      scripts:
-        - name: Upload APK to Supabase
-          script: |
-            set -e
-
-            if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_KEY" ] || [ -z "$SUPABASE_BUCKET" ]; then
-              echo "Supabase vars not set — skipping upload."
-              exit 0
-            fi
-
-            # Find the APK — searches all subdirs under outputs/apk/ (e.g. release/, debug/)
-            APK=$(find . -name "*.apk" -path "*/app/build/outputs/apk/*" 2>/dev/null | head -1)
-            if [ -z "$APK" ]; then
-              echo "No APK found under */app/build/outputs/apk/*"
-              echo "Searching broadly for any .apk..."
-              APK=$(find . -name "*.apk" 2>/dev/null | grep -v node_modules | head -1)
-            fi
-            if [ -z "$APK" ]; then
-              echo "No APK found anywhere — build may have failed silently."
-              exit 1
-            fi
-            echo "Found APK: $APK"
-
-            APP_JSON=$(find . -maxdepth 8 -name "app.json" -exec grep -l '"expo"' {} \; 2>/dev/null | head -1)
-            VERSION=$(node -e "console.log(require('./$APP_JSON').expo.version)")
-            TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-            VERSIONED="flashlight-strobe-v${VERSION}-${TIMESTAMP}.apk"
-            LATEST="flashlight-strobe-latest.apk"
-
-            upload() {
-              HTTP=$(curl -fsSL -o /dev/null -w "%{http_code}" \
-                -X POST \
-                "${SUPABASE_URL}/storage/v1/object/${SUPABASE_BUCKET}/$1?upsert=true" \
-                -H "Authorization: Bearer ${SUPABASE_KEY}" \
-                -H "Content-Type: application/octet-stream" \
-                -H "x-upsert: true" \
-                --data-binary @"${APK}")
-              echo "$1 -> HTTP $HTTP"
-              [ "$HTTP" -ge 200 ] && [ "$HTTP" -lt 300 ] || exit 1
-            }
-
-            upload "$VERSIONED"
-            upload "$LATEST"
-
-            echo "Done: ${SUPABASE_URL}/storage/v1/object/public/${SUPABASE_BUCKET}/${LATEST}"
-            echo "Update remote config: latestApkVersion=${VERSION}"
