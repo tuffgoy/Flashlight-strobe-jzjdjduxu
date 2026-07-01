@@ -31,7 +31,7 @@ workflows:
           echo "=== package.json locations ==="
           find . -maxdepth 6 -name "package.json" 2>/dev/null | grep -v node_modules
 
-- name: Install JS dependencies
+      - name: Install JS dependencies
         script: |
           set -e
           corepack enable
