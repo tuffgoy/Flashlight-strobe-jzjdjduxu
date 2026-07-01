@@ -76,7 +76,7 @@ workflows:
             }
           "
 
-          # 4. Clean workspace installation (no vanilla npm interventions)
+          # 4. Clean workspace installation
           cd "$WORKSPACE_ABS"
           pnpm install --no-frozen-lockfile --shamefully-hoist
 
@@ -94,7 +94,7 @@ workflows:
           echo "=== Pre-bundling JS via isolated expo export:embed ==="
           mkdir -p "$APP_ABS/android/app/src/main/assets"
           
-          # Locate absolute binary path inside workspace now that installation completes first
+          # Locate absolute binary path inside workspace
           EXPO_BIN=$(find "$WORKSPACE_ABS/node_modules/.bin" "$APP_ABS/node_modules/.bin" -name "expo" -type f 2>/dev/null | head -1)
           if [ -z "$EXPO_BIN" ]; then
             echo "Error: Cannot find binary execution path for expo. Checking local node modules fallback..."
@@ -113,7 +113,18 @@ workflows:
 
           echo "=== Native Bundle compilation completed successfully ==="
           echo "=== Launching Gradle distribution compilation (Skipping broken bundle sub-task) ==="
-          cd "$APP_ABS/android"
+          
+          # DYNAMIC FIX: Traverse and locate the absolute path where gradlew exists
+          GRADLEW_PATH=$(find . -maxdepth 4 -name "gradlew" -type f 2>/dev/null | head -1)
+          if [ -z "$GRADLEW_PATH" ]; then
+            # Scan upwards/broadly if not found locally
+            GRADLEW_PATH=$(find "$WORKSPACE_ABS" -name "gradlew" -type f 2>/dev/null | head -1)
+          fi
+          
+          GRADLE_DIR=$(dirname "$GRADLEW_PATH")
+          echo "Located Gradle workspace execution root at: $GRADLE_DIR"
+          
+          cd "$GRADLE_DIR"
           chmod +x ./gradlew
           ./gradlew assembleRelease -x createBundleReleaseJsAndAssets --no-daemon
 
