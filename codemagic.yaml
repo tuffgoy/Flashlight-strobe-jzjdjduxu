@@ -31,19 +31,19 @@ workflows:
           echo "=== package.json locations ==="
           find . -maxdepth 6 -name "package.json" 2>/dev/null | grep -v node_modules
 
-      - name: Install JS dependencies
+- name: Install JS dependencies
         script: |
           set -e
+          corepack enable
+          corepack prepare pnpm@9 --activate
           APP_DIR=$(find . -maxdepth 6 -name "app.json" -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
           echo "App dir: $APP_DIR"
           cd "$APP_DIR"
-          echo "--- package.json ---"
-          cat package.json
           echo "--- npm install ---"
-          npm install --legacy-peer-deps
+          pnpm install --no-frozen-lockfile
           echo "--- installed expo version ---"
           cat node_modules/expo/package.json | grep '"version"' | head -1
-
+          
       - name: Expo prebuild (generate Android project)
         script: |
           set -e
@@ -119,12 +119,21 @@ workflows:
               exit 0
             fi
 
-            APK=$(find . -path "*/app/build/outputs/apk/*.apk" 2>/dev/null \
-               || find . -path "*/app/build/outputs/apk/**/*.apk" 2>/dev/null | head -1)
-            if [ -z "$APK" ]; then echo "No APK found!"; exit 1; fi
+            # Find the APK — searches all subdirs under outputs/apk/ (e.g. release/, debug/)
+            APK=$(find . -name "*.apk" -path "*/app/build/outputs/apk/*" 2>/dev/null | head -1)
+            if [ -z "$APK" ]; then
+              echo "No APK found under */app/build/outputs/apk/*"
+              echo "Searching broadly for any .apk..."
+              APK=$(find . -name "*.apk" 2>/dev/null | grep -v node_modules | head -1)
+            fi
+            if [ -z "$APK" ]; then
+              echo "No APK found anywhere — build may have failed silently."
+              exit 1
+            fi
+            echo "Found APK: $APK"
 
             APP_JSON=$(find . -maxdepth 8 -name "app.json" -exec grep -l '"expo"' {} \; 2>/dev/null | head -1)
-            VERSION=$(node -e "console.log(require('$APP_JSON').expo.version)")
+            VERSION=$(node -e "console.log(require('./$APP_JSON').expo.version)")
             TIMESTAMP=$(date +%Y%m%d-%H%M%S)
             VERSIONED="flashlight-strobe-v${VERSION}-${TIMESTAMP}.apk"
             LATEST="flashlight-strobe-latest.apk"
