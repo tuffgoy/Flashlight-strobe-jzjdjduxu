@@ -166,40 +166,22 @@ workflows:
           APP_DIR=$(find . -maxdepth 4 -name "app.json" \
             -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
           APP_ABS=$(cd "$APP_DIR" && pwd)
-          WORKSPACE_ABS=$(cd "$APP_DIR/../.." && pwd 2>/dev/null || cd "$APP_DIR/.." && pwd)
           WORKSPACE_YAML=$(find . -maxdepth 5 -name "pnpm-workspace.yaml" 2>/dev/null | head -1)
-          if [ -n "$WORKSPACE_YAML" ]; then
-            WORKSPACE_ABS=$(cd "$(dirname "$WORKSPACE_YAML")" && pwd)
-          fi
+          WORKSPACE_ABS=$(cd "$(dirname "$WORKSPACE_YAML")" && pwd)
           echo "App: $APP_ABS  Workspace: $WORKSPACE_ABS"
 
-          # Gradle's createBundleReleaseJsAndAssets spawns a bare `node` process
-          # that cannot find babel-preset-expo because it runs outside of pnpm's
-          # module resolution context. Fix: pre-bundle the JS ourselves, then tell
-          # Gradle to skip the bundle task since it is already done.
-          echo "=== Pre-bundling JS via expo export:embed ==="
-          mkdir -p "$APP_ABS/android/app/src/main/assets"
-          EXPO_BIN=$(find "$APP_ABS/node_modules/.bin" "$WORKSPACE_ABS/node_modules/.bin" \
-            -name "expo" -type f 2>/dev/null | head -1)
-          echo "Using expo binary: $EXPO_BIN"
-          cd "$APP_ABS"
-          # Resolve expo-router entry: with shamefully-hoist it lands in workspace root
-          ENTRY_FILE="$APP_ABS/node_modules/expo-router/entry.js"
-          if [ ! -f "$ENTRY_FILE" ]; then
-            ENTRY_FILE="$WORKSPACE_ABS/node_modules/expo-router/entry.js"
-          fi
-          echo "Entry file: $ENTRY_FILE"
-          EXPO_PROJECT_ROOT="$APP_ABS" NODE_ENV=production "$EXPO_BIN" export:embed \
-            --platform android \
-            --entry-file "$ENTRY_FILE" \
-            --bundle-output "$APP_ABS/android/app/src/main/assets/index.android.bundle" \
-            --assets-dest "$APP_ABS/android/app/src/main/res" \
-            --dev false
+          # Gradle's createBundleReleaseJsAndAssets spawns a bare node subprocess.
+          # That subprocess can't find babel-preset-expo because pnpm keeps it in
+          # the workspace root's node_modules, not the app's. NODE_PATH is the
+          # standard Node mechanism to add extra module lookup directories; child
+          # processes inherit it, so the Gradle-spawned node will find the preset.
+          export NODE_PATH="$WORKSPACE_ABS/node_modules:$APP_ABS/node_modules"
+          export NODE_ENV=production
+          echo "NODE_PATH=$NODE_PATH"
 
-          echo "=== Bundle complete, running Gradle (skipping bundle task) ==="
           cd "$APP_ABS/android"
           chmod +x ./gradlew
-          ./gradlew assembleRelease -x createBundleReleaseJsAndAssets --no-daemon
+          ./gradlew assembleRelease --no-daemon
 
     artifacts:
       - "**/app/build/outputs/apk/**/*.apk"
