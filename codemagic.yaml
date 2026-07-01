@@ -33,34 +33,46 @@ workflows:
         script: |
           set -e
 
-          # The repo structure is: repo-root/ contains pnpm-workspace.yaml
-          # and flashlight-strobe/ is the Expo app workspace member.
-          WORKSPACE_ABS=$(pwd)
-          APP_ABS="$WORKSPACE_ABS/flashlight-strobe"
+          # Detect paths dynamically — Codemagic's working dir is the parent of
+          # the actual clone directory, so we can't hardcode paths.
+          APP_DIR=$(find . -maxdepth 5 -name "app.json" \
+            -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
+          APP_ABS=$(cd "$APP_DIR" && pwd)
+
+          WORKSPACE_YAML=$(find . -maxdepth 6 -name "pnpm-workspace.yaml" 2>/dev/null | head -1)
+          if [ -z "$WORKSPACE_YAML" ]; then
+            echo "ERROR: no pnpm-workspace.yaml found"
+            exit 1
+          fi
+          WORKSPACE_ABS=$(cd "$(dirname "$WORKSPACE_YAML")" && pwd)
 
           echo "Workspace root: $WORKSPACE_ABS"
           echo "App dir:        $APP_ABS"
 
-          # Install all workspace dependencies.
-          # --shamefully-hoist lifts packages to the root node_modules where
-          # possible, but pnpm still keeps transitive deps in .pnpm/ store.
+          # Install all workspace dependencies with shameful hoisting.
+          cd "$WORKSPACE_ABS"
           pnpm install --no-frozen-lockfile --shamefully-hoist
 
-          # CRITICAL: babel-preset-expo is a transitive dep that lives inside
-          # pnpm's .pnpm virtual store and is NOT directly available in either
-          # the workspace root or app node_modules via normal require() resolution.
-          # NODE_PATH tricks don't help because pnpm's isolated store means
-          # there is no flat babel-preset-expo/ symlink to point at.
+          # CRITICAL FIX: babel-preset-expo is a transitive dependency that pnpm
+          # stores in its isolated .pnpm virtual store. Even with --shamefully-hoist,
+          # pnpm does NOT create a flat node_modules/babel-preset-expo symlink
+          # because it considers the preset an internal dep of the expo package,
+          # not a hoistable workspace dep.
           #
-          # Fix: install it directly into the app's node_modules using npm
-          # (--no-save skips package.json modification). Metro and Babel will
-          # find it via standard upward directory traversal from the app root.
+          # When Gradle spawns node for Metro bundler, Babel looks for
+          # babel-preset-expo starting from the app directory. Without a direct
+          # symlink there (or in any parent up to the filesystem root), it fails.
+          # NODE_PATH tricks don't help because there is no flat copy to point at.
+          #
+          # Fix: install babel-preset-expo directly into the app's node_modules
+          # using npm --no-save (no package.json modification). Metro/Babel then
+          # finds it via standard upward directory traversal.
           echo "Ensuring babel-preset-expo is resolvable from app directory..."
           cd "$APP_ABS"
           if ! node -e "require.resolve('babel-preset-expo')" 2>/dev/null; then
-            echo "babel-preset-expo not found — installing locally with npm..."
+            echo "babel-preset-expo not found — installing locally..."
             npm install --no-save babel-preset-expo
-            echo "babel-preset-expo installed successfully."
+            echo "babel-preset-expo installed."
           else
             echo "babel-preset-expo already resolvable — skipping."
           fi
@@ -68,20 +80,26 @@ workflows:
       - name: Expo prebuild (generate Android project)
         script: |
           set -e
-          cd flashlight-strobe
+          APP_DIR=$(find . -maxdepth 5 -name "app.json" \
+            -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
+          cd "$APP_DIR"
           pnpm exec expo prebuild --platform android --clean --no-install
 
       - name: Set Android SDK path
         script: |
-          echo "sdk.dir=$ANDROID_SDK_ROOT" > flashlight-strobe/android/local.properties
+          APP_DIR=$(find . -maxdepth 5 -name "app.json" \
+            -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > "$APP_DIR/android/local.properties"
 
       - name: Configure release keystore
         script: |
           set -e
-          ANDROID_DIR="flashlight-strobe/android"
+          APP_DIR=$(find . -maxdepth 5 -name "app.json" \
+            -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
+          ANDROID_DIR="$APP_DIR/android"
           APP_GRADLE="$ANDROID_DIR/app/build.gradle"
 
-          echo "Decoding keystore..."
+          echo "Decoding keystore into $ANDROID_DIR/app/release.keystore"
           echo "$CM_KEYSTORE" | base64 --decode > "$ANDROID_DIR/app/release.keystore"
 
           cat >> "$ANDROID_DIR/gradle.properties" << PROPS
@@ -113,8 +131,13 @@ workflows:
       - name: Build release APK
         script: |
           set -e
+          APP_DIR=$(find . -maxdepth 5 -name "app.json" \
+            -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
+          APP_ABS=$(cd "$APP_DIR" && pwd)
+          echo "Building APK for app at: $APP_ABS"
+
           export NODE_ENV=production
-          cd flashlight-strobe/android
+          cd "$APP_ABS/android"
           chmod +x ./gradlew
           ./gradlew assembleRelease --no-daemon
 
@@ -136,7 +159,9 @@ workflows:
                          -path "*/app/build/outputs/apk/**/*.apk" 2>/dev/null | head -1)
             if [ -z "$APK" ]; then echo "No APK found!"; exit 1; fi
 
-            VERSION=$(node -e "console.log(require('./flashlight-strobe/app.json').expo.version)")
+            APP_JSON=$(find . -maxdepth 5 -name "app.json" \
+              -exec grep -l '"expo"' {} \; 2>/dev/null | head -1)
+            VERSION=$(node -e "console.log(require('$APP_JSON').expo.version)")
             TIMESTAMP=$(date +%Y%m%d-%H%M%S)
             VERSIONED="flashlight-strobe-v${VERSION}-${TIMESTAMP}.apk"
             LATEST="flashlight-strobe-latest.apk"
