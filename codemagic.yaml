@@ -75,33 +75,100 @@ workflows:
           cd "$WORKSPACE_DIR/$APP_SUBDIR"
           pnpm exec expo prebuild --platform android --clean --no-install
 
+      - name: Patch gradle.properties for Android compatibility
+        script: |
+          set -e
+          GRADLE_PROPS="$WORKSPACE_DIR/$APP_SUBDIR/android/gradle.properties"
+          echo "=== gradle.properties before patch ==="
+          cat "$GRADLE_PROPS"
+          echo ""
+
+          # Disable New Architecture — react-native-worklets 0.5.1, expo-glass-effect,
+          # and reanimated 4.x are not all fully compatible with New Arch on Android.
+          # Switching to old arch produces a stable APK.
+          if grep -q "newArchEnabled=true" "$GRADLE_PROPS"; then
+            sed -i 's/newArchEnabled=true/newArchEnabled=false/' "$GRADLE_PROPS"
+            echo "newArchEnabled: true -> false"
+          elif grep -q "newArchEnabled" "$GRADLE_PROPS"; then
+            sed -i 's/newArchEnabled=.*/newArchEnabled=false/' "$GRADLE_PROPS"
+            echo "newArchEnabled: overridden to false"
+          else
+            echo "newArchEnabled=false" >> "$GRADLE_PROPS"
+            echo "newArchEnabled=false appended"
+          fi
+
+          echo "=== Key gradle.properties values after patch ==="
+          grep -E "newArchEnabled|hermesEnabled" "$GRADLE_PROPS" || true
+
       - name: Set Android SDK path
         script: |
           echo "sdk.dir=$ANDROID_SDK_ROOT" > "$WORKSPACE_DIR/$APP_SUBDIR/android/local.properties"
 
       - name: Configure release keystore
         script: |
+          set -e
           ANDROID_DIR="$WORKSPACE_DIR/$APP_SUBDIR/android"
           APP_GRADLE="$ANDROID_DIR/app/build.gradle"
 
           echo "Decoding keystore..."
           echo "$CM_KEYSTORE" | base64 --decode > "$ANDROID_DIR/app/release.keystore"
+          ls -lh "$ANDROID_DIR/app/release.keystore"
 
-          printf '\nMYAPP_RELEASE_STORE_FILE=release.keystore\nMYAPP_RELEASE_KEY_ALIAS=%s\nMYAPP_RELEASE_STORE_PASSWORD=%s\nMYAPP_RELEASE_KEY_PASSWORD=%s\n' "$CM_KEY_ALIAS" "$CM_KEYSTORE_PASSWORD" "$CM_KEY_PASSWORD" >> "$ANDROID_DIR/gradle.properties"
+          printf '\nMYAPP_RELEASE_STORE_FILE=release.keystore\nMYAPP_RELEASE_KEY_ALIAS=%s\nMYAPP_RELEASE_STORE_PASSWORD=%s\nMYAPP_RELEASE_KEY_PASSWORD=%s\n' \
+            "$CM_KEY_ALIAS" "$CM_KEYSTORE_PASSWORD" "$CM_KEY_PASSWORD" >> "$ANDROID_DIR/gradle.properties"
 
-          node -e "const fs=require('fs');const file='$APP_GRADLE';let src=fs.readFileSync(file,'utf8');const block='\n              release {\n                  storeFile file(MYAPP_RELEASE_STORE_FILE)\n                  storePassword MYAPP_RELEASE_STORE_PASSWORD\n                  keyAlias MYAPP_RELEASE_KEY_ALIAS\n                  keyPassword MYAPP_RELEASE_KEY_PASSWORD\n              }';if(!src.includes('MYAPP_RELEASE_STORE_FILE')){src=src.replace(/signingConfigs\s*\{/,'signingConfigs {'+block);}src=src.replace(/signingConfig signingConfigs\.debug/g,'signingConfig signingConfigs.release');fs.writeFileSync(file,src);console.log('build.gradle patched.');"
+          node -e "
+            const fs = require('fs');
+            const file = '$APP_GRADLE';
+            let src = fs.readFileSync(file, 'utf8');
 
-          echo "=== build.gradle signing section ==="
-          grep -A 20 "signingConfigs" "$APP_GRADLE" || echo "(signingConfigs not found)"
+            // Inject release signing config block if not already present
+            if (!src.includes('MYAPP_RELEASE_STORE_FILE')) {
+              const block = '\n        release {\n            storeFile file(MYAPP_RELEASE_STORE_FILE)\n            storePassword MYAPP_RELEASE_STORE_PASSWORD\n            keyAlias MYAPP_RELEASE_KEY_ALIAS\n            keyPassword MYAPP_RELEASE_KEY_PASSWORD\n        }';
+              if (src.match(/signingConfigs\s*\{/)) {
+                src = src.replace(/signingConfigs\s*\{/, 'signingConfigs {' + block);
+                console.log('Injected release signing config block.');
+              } else {
+                console.error('WARNING: signingConfigs block not found in build.gradle!');
+              }
+            } else {
+              console.log('Release signing config already present, skipping injection.');
+            }
+
+            // Replace debug signing with release signing in buildTypes.
+            // Handles both 'signingConfig signingConfigs.debug' and 'signingConfig = signingConfigs.debug'
+            const before = src;
+            src = src.replace(/signingConfig\s*=?\s*signingConfigs\.debug/g, 'signingConfig signingConfigs.release');
+            const replaced = (src !== before);
+            console.log('signingConfig lines replaced:', replaced);
+
+            fs.writeFileSync(file, src);
+            console.log('build.gradle patched successfully.');
+          "
+
+          echo "=== Signing config in build.gradle ==="
+          grep -n -A 8 "signingConfigs" "$APP_GRADLE" || echo "(signingConfigs block not found)"
+          echo "=== Release buildType signing ==="
+          grep -n "signingConfig" "$APP_GRADLE" || echo "(no signingConfig lines found)"
 
       - name: Build release APK
         script: |
-          set -eo pipefail
+          set -e
           cd "$WORKSPACE_DIR/$APP_SUBDIR/android"
           chmod +x ./gradlew
-          ./gradlew assembleRelease --no-daemon 2>&1 | tee /tmp/gradle.log
-          echo "=== APK search ==="
-          find . -name "*.apk" 2>/dev/null || echo "No APKs found after build"
+          echo "Starting Gradle assembleRelease..."
+          ./gradlew assembleRelease --no-daemon > /tmp/gradle.log 2>&1 || {
+            echo ""
+            echo "================================================================"
+            echo "GRADLE BUILD FAILED — last 300 lines:"
+            echo "================================================================"
+            tail -300 /tmp/gradle.log
+            echo "================================================================"
+            exit 1
+          }
+          echo "=== Gradle build succeeded ==="
+          echo "=== APK locations ==="
+          find . -name "*.apk" 2>/dev/null || echo "WARNING: no APK files found"
 
       - name: Upload APK to Supabase
         script: |
