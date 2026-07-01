@@ -41,8 +41,6 @@ workflows:
           npm install -g pnpm@9 --force
           pnpm --version
 
-      # ── Fix A: pnpm-workspace.yaml lists "artifacts/*" but app is at "flashlight-strobe/"
-      # ── Fix B: @workspace/api-client-react does not exist in this repo
       - name: Patch workspace config
         script: |
           cd "$WORKSPACE_DIR"
@@ -62,23 +60,13 @@ workflows:
             console.log('package.json: removed @workspace/api-client-react');
           "
 
-      # ── Fix C: expo-symbols and expo-router/unstable-native-tabs are iOS-only packages.
-      #    Metro bundler fails to process them during the Android release build.
-      #    Rewrite _layout.tsx to a cross-platform version using only Feather icons.
-      #
-      # ── Fix D: tsconfig.json has a broken reference to ../../lib/api-client-react
-      #    which doesn't exist in this repo. Remove it.
-      #
-      # ── Fix E: reactCompiler:true in app.json enables an experimental Babel plugin
-      #    that can crash on complex hook patterns. Disable it for the Android build.
       - name: Patch iOS-only source files for Android build
         script: |
           cd "$WORKSPACE_DIR/$APP_SUBDIR"
 
-          # Rewrite _layout.tsx — remove expo-symbols + NativeTabs (iOS-only)
-          node -e "
-            const fs = require('fs');
-            const layout = \`import React from 'react';
+          # Write Android-safe _layout.tsx using heredoc (avoids YAML parsing issues)
+          cat > "app/(tabs)/_layout.tsx" << 'EOFILE'
+import React from 'react';
 import { Platform, StyleSheet, useColorScheme, View } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import { BlurView } from 'expo-blur';
@@ -121,56 +109,54 @@ export default function TabLayout() {
         },
         tabBarBackground: () =>
           isIOS ? (
-            <BlurView intensity={100} tint=\"dark\" style={StyleSheet.absoluteFill} />
+            <BlurView intensity={100} tint="dark" style={StyleSheet.absoluteFill} />
           ) : isWeb ? (
             <View style={[StyleSheet.absoluteFill, { backgroundColor: colors.background }]} />
           ) : null,
       }}
     >
       <Tabs.Screen
-        name=\"index\"
+        name="index"
         options={{
           title: 'STROBE',
           tabBarLabel: 'Strobe',
-          tabBarIcon: ({ color }) => <Feather name=\"zap\" size={20} color={color} />,
+          tabBarIcon: ({ color }) => <Feather name="zap" size={20} color={color} />,
         }}
       />
       <Tabs.Screen
-        name=\"patterns\"
+        name="patterns"
         options={{
           title: 'PATTERNS',
           tabBarLabel: 'Patterns',
-          tabBarIcon: ({ color }) => <Feather name=\"grid\" size={20} color={color} />,
+          tabBarIcon: ({ color }) => <Feather name="grid" size={20} color={color} />,
         }}
       />
       <Tabs.Screen
-        name=\"settings\"
+        name="settings"
         options={{
           title: 'SETTINGS',
           tabBarLabel: 'Settings',
-          tabBarIcon: ({ color }) => <Feather name=\"settings\" size={20} color={color} />,
+          tabBarIcon: ({ color }) => <Feather name="settings" size={20} color={color} />,
         }}
       />
     </Tabs>
   );
 }
-\`;
-            fs.writeFileSync('app/(tabs)/_layout.tsx', layout);
-            console.log('_layout.tsx: rewritten without iOS-only imports');
-          "
+EOFILE
+          echo "_layout.tsx: rewritten without iOS-only imports"
 
-          # Fix tsconfig.json: remove broken reference to ../../lib/api-client-react
+          # Remove broken tsconfig reference to api-client-react
           node -e "
             const fs = require('fs');
             const ts = JSON.parse(fs.readFileSync('tsconfig.json', 'utf8'));
-            ts.references = (ts.references || []).filter(
-              r => !r.path.includes('api-client-react')
-            );
+            ts.references = (ts.references || []).filter(function(r) {
+              return r.path.indexOf('api-client-react') === -1;
+            });
             fs.writeFileSync('tsconfig.json', JSON.stringify(ts, null, 2) + '\n');
             console.log('tsconfig.json: removed broken api-client-react reference');
           "
 
-          # Fix app.json: disable experimental React Compiler (crashes Metro on complex hooks)
+          # Disable experimental React Compiler (can crash Metro on complex hooks)
           node -e "
             const fs = require('fs');
             const app = JSON.parse(fs.readFileSync('app.json', 'utf8'));
@@ -214,13 +200,7 @@ export default function TabLayout() {
             const fs = require('fs');
             const file = '$APP_GRADLE';
             let src = fs.readFileSync(file, 'utf8');
-            const block = \`
-              release {
-                  storeFile file(MYAPP_RELEASE_STORE_FILE)
-                  storePassword MYAPP_RELEASE_STORE_PASSWORD
-                  keyAlias MYAPP_RELEASE_KEY_ALIAS
-                  keyPassword MYAPP_RELEASE_KEY_PASSWORD
-              }\`;
+            const block = '\n              release {\n                  storeFile file(MYAPP_RELEASE_STORE_FILE)\n                  storePassword MYAPP_RELEASE_STORE_PASSWORD\n                  keyAlias MYAPP_RELEASE_KEY_ALIAS\n                  keyPassword MYAPP_RELEASE_KEY_PASSWORD\n              }';
             if (!src.includes('MYAPP_RELEASE_STORE_FILE')) {
               src = src.replace(/signingConfigs\s*\{/, 'signingConfigs {' + block);
             }
@@ -233,7 +213,7 @@ export default function TabLayout() {
         script: |
           cd "$WORKSPACE_DIR/$APP_SUBDIR/android"
           chmod +x ./gradlew
-          ./gradlew assembleRelease --no-daemon --stacktrace 2>&1 | tail -100
+          ./gradlew assembleRelease --no-daemon --stacktrace 2>&1 | tail -150
 
     artifacts:
       - "**/app/build/outputs/apk/**/*.apk"
