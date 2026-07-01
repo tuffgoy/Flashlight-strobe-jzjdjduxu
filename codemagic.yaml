@@ -79,7 +79,7 @@ workflows:
           cd "$WORKSPACE_ABS"
           pnpm install --no-frozen-lockfile --shamefully-hoist
 
-      - name: Build release APK
+            - name: Build release APK
         script: |
           set -e
           
@@ -97,11 +97,10 @@ workflows:
           EXPO_BIN=$(find "$WORKSPACE_ABS/node_modules/.bin" "$APP_ABS/node_modules/.bin" -name "expo" -type f 2>/dev/null | head -1)
           echo "Using expo binary path: $EXPO_BIN"
           
-          # Execute bundler directly from project target directory to keep monorepo scope clean
+          # Execute bundler directly inside the target application directory
           cd "$APP_ABS"
           NODE_ENV=production "$EXPO_BIN" export:embed \
             --platform android \
-            --project-root "$APP_ABS" \
             --entry-file node_modules/expo-router/entry.js \
             --bundle-output android/app/src/main/assets/index.android.bundle \
             --assets-dest android/app/src/main/res \
@@ -112,6 +111,7 @@ workflows:
           cd "$APP_ABS/android"
           chmod +x ./gradlew
           ./gradlew assembleRelease -x createBundleReleaseJsAndAssets --no-daemon
+
 
       - name: Upload APK to Supabase
         script: |
