@@ -25,12 +25,10 @@ workflows:
     scripts:
       - name: Show repo structure
         script: |
-          echo "=== Working directory ==="
-          pwd
-          echo "=== Root contents ==="
-          ls -la
-          echo "=== All app.json files found ==="
-          find . -maxdepth 4 -name "app.json" 2>/dev/null
+          echo "=== pwd ===" && pwd
+          echo "=== root ===" && ls -la
+          echo "=== pnpm-workspace.yaml locations ===" && find . -maxdepth 5 -name "pnpm-workspace.yaml" 2>/dev/null
+          echo "=== app.json locations ===" && find . -maxdepth 5 -name "app.json" 2>/dev/null
 
       - name: Install pnpm
         script: |
@@ -40,46 +38,48 @@ workflows:
 
       - name: Install JS dependencies
         script: |
-          # Find the Expo app directory (contains app.json with "expo" key)
-          APP_DIR=$(find . -maxdepth 4 -name "app.json" \
-            -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
-          echo "Expo app found at: $APP_DIR"
-          # Install from workspace root if workspace file exists, else from app dir
-          if [ -f "pnpm-workspace.yaml" ]; then
-            pnpm install --no-frozen-lockfile
-          else
-            cd "$APP_DIR" && pnpm install --no-frozen-lockfile
-          fi
+          # Find pnpm-workspace.yaml — that's the workspace root
+          WORKSPACE=$(find . -maxdepth 5 -name "pnpm-workspace.yaml" | head -1 | xargs dirname)
+          echo "Workspace root: $WORKSPACE"
+          cd "$WORKSPACE"
+          pnpm install --no-frozen-lockfile
 
       - name: Expo prebuild (generate Android project)
         script: |
-          APP_DIR=$(find . -maxdepth 4 -name "app.json" \
-            -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
-          echo "Running prebuild in: $APP_DIR"
+          WORKSPACE=$(find . -maxdepth 5 -name "pnpm-workspace.yaml" | head -1 | xargs dirname)
+          cd "$WORKSPACE"
+          APP_DIR=$(find . -maxdepth 4 -name "app.json" -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
+          echo "App dir: $APP_DIR"
           cd "$APP_DIR"
-          # Use locally installed expo, fall back to npx if not found
+          # Use workspace node_modules expo binary
           if [ -f "node_modules/.bin/expo" ]; then
-            node_modules/.bin/expo prebuild --platform android --clean --no-install
+            ./node_modules/.bin/expo prebuild --platform android --clean --no-install
+          elif [ -f "../../node_modules/.bin/expo" ]; then
+            ../../node_modules/.bin/expo prebuild --platform android --clean --no-install
           elif [ -f "../node_modules/.bin/expo" ]; then
             ../node_modules/.bin/expo prebuild --platform android --clean --no-install
           else
-            npx expo prebuild --platform android --clean
+            echo "ERROR: expo binary not found. Install may have failed."
+            find "$OLDPWD" -maxdepth 6 -name "expo" -path "*/node_modules/.bin/*" 2>/dev/null
+            exit 1
           fi
 
       - name: Set Android SDK path
         script: |
-          APP_DIR=$(find . -maxdepth 4 -name "app.json" \
-            -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
+          WORKSPACE=$(find . -maxdepth 5 -name "pnpm-workspace.yaml" | head -1 | xargs dirname)
+          cd "$WORKSPACE"
+          APP_DIR=$(find . -maxdepth 4 -name "app.json" -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
           echo "sdk.dir=$ANDROID_SDK_ROOT" > "$APP_DIR/android/local.properties"
 
       - name: Configure release keystore
         script: |
-          APP_DIR=$(find . -maxdepth 4 -name "app.json" \
-            -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
+          WORKSPACE=$(find . -maxdepth 5 -name "pnpm-workspace.yaml" | head -1 | xargs dirname)
+          cd "$WORKSPACE"
+          APP_DIR=$(find . -maxdepth 4 -name "app.json" -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
           ANDROID_DIR="$APP_DIR/android"
           APP_GRADLE="$ANDROID_DIR/app/build.gradle"
 
-          echo "Decoding keystore into $ANDROID_DIR/app/release.keystore"
+          echo "Decoding keystore..."
           echo "$CM_KEYSTORE" | base64 --decode > "$ANDROID_DIR/app/release.keystore"
 
           cat >> "$ANDROID_DIR/gradle.properties" << PROPS
@@ -110,8 +110,9 @@ workflows:
 
       - name: Build release APK
         script: |
-          APP_DIR=$(find . -maxdepth 4 -name "app.json" \
-            -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
+          WORKSPACE=$(find . -maxdepth 5 -name "pnpm-workspace.yaml" | head -1 | xargs dirname)
+          cd "$WORKSPACE"
+          APP_DIR=$(find . -maxdepth 4 -name "app.json" -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
           cd "$APP_DIR/android"
           chmod +x ./gradlew
           ./gradlew assembleRelease --no-daemon
@@ -130,12 +131,11 @@ workflows:
               exit 0
             fi
 
-            APK=$(find . -path "*/app/build/outputs/apk/*.apk" -o \
-                         -path "*/app/build/outputs/apk/**/*.apk" 2>/dev/null | head -1)
+            APK=$(find . -path "*/app/build/outputs/apk/*.apk" 2>/dev/null \
+               || find . -path "*/app/build/outputs/apk/**/*.apk" 2>/dev/null | head -1)
             if [ -z "$APK" ]; then echo "No APK found!"; exit 1; fi
 
-            APP_JSON=$(find . -maxdepth 4 -name "app.json" \
-              -exec grep -l '"expo"' {} \; 2>/dev/null | head -1)
+            APP_JSON=$(find . -maxdepth 6 -name "app.json" -exec grep -l '"expo"' {} \; 2>/dev/null | head -1)
             VERSION=$(node -e "console.log(require('$APP_JSON').expo.version)")
             TIMESTAMP=$(date +%Y%m%d-%H%M%S)
             VERSIONED="flashlight-strobe-v${VERSION}-${TIMESTAMP}.apk"
