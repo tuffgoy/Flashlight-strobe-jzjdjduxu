@@ -83,7 +83,7 @@ workflows:
           fi
 
           cd "$WORKSPACE_ABS"
-          pnpm install --no-frozen-lockfile
+          pnpm install --no-frozen-lockfile --shamefully-hoist
 
           echo "=== Verifying expo was installed in the app package ==="
           cd "$APP_ABS"
