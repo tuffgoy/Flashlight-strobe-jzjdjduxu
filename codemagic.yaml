@@ -45,42 +45,58 @@ workflows:
           set -e
           APP_DIR=$(find . -maxdepth 4 -name "app.json" \
             -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
-          echo "Expo app found at: $APP_DIR"
+          APP_ABS=$(cd "$APP_DIR" && pwd)
+          echo "Expo app found at: $APP_ABS"
 
-          # This app's package.json uses pnpm's "catalog:" and "workspace:*"
-          # specifiers, which only resolve from within a real pnpm workspace.
-          # Find the nearest ancestor directory that owns pnpm-workspace.yaml
-          # and install from there instead of from the nested app folder.
           WORKSPACE_YAML=$(find . -maxdepth 5 -name "pnpm-workspace.yaml" 2>/dev/null | head -1)
-
-          if [ -n "$WORKSPACE_YAML" ]; then
-            WORKSPACE_ROOT=$(dirname "$WORKSPACE_YAML")
-            echo "Found pnpm workspace root at: $WORKSPACE_ROOT"
-            cd "$WORKSPACE_ROOT"
-            pnpm install --no-frozen-lockfile
-          else
-            echo "WARNING: no pnpm-workspace.yaml found within depth 5."
-            echo "This package.json references 'catalog:' / 'workspace:*' deps,"
-            echo "which cannot resolve without a workspace root. Installing"
-            echo "directly in the app folder anyway, but this will likely fail."
-            cd "$APP_DIR"
-            pnpm install --no-frozen-lockfile
+          if [ -z "$WORKSPACE_YAML" ]; then
+            echo "ERROR: no pnpm-workspace.yaml found. This package.json uses"
+            echo "'catalog:' / 'workspace:*' specifiers which require one."
+            exit 1
           fi
 
+          WORKSPACE_ROOT=$(dirname "$WORKSPACE_YAML")
+          WORKSPACE_ABS=$(cd "$WORKSPACE_ROOT" && pwd)
+          echo "Found pnpm workspace root at: $WORKSPACE_ABS"
+          echo "--- pnpm-workspace.yaml (before) ---"
+          cat "$WORKSPACE_YAML"
+
+          # Ask pnpm which directories it currently recognizes as workspace
+          # members. If the app folder isn't among them, its deps (including
+          # expo) are invisible to install no matter how many times we run it.
+          RECOGNIZED=$(cd "$WORKSPACE_ABS" && pnpm -r exec -- pwd 2>/dev/null || true)
+          echo "--- Workspace packages pnpm currently recognizes ---"
+          echo "$RECOGNIZED"
+
+          if ! echo "$RECOGNIZED" | grep -qF "$APP_ABS"; then
+            echo "App folder is NOT a recognized pnpm workspace member. Patching pnpm-workspace.yaml..."
+            if grep -q '^packages:' "$WORKSPACE_YAML"; then
+              awk '{print} /^packages:/ && !done {print "  - \"*\""; print "  - \"packages/*\""; print "  - \"apps/*\""; done=1}' \
+                "$WORKSPACE_YAML" > "$WORKSPACE_YAML.tmp"
+            else
+              { printf 'packages:\n  - "*"\n  - "packages/*"\n  - "apps/*"\n'; cat "$WORKSPACE_YAML"; } \
+                > "$WORKSPACE_YAML.tmp"
+            fi
+            mv "$WORKSPACE_YAML.tmp" "$WORKSPACE_YAML"
+            echo "--- pnpm-workspace.yaml (after patch) ---"
+            cat "$WORKSPACE_YAML"
+          fi
+
+          cd "$WORKSPACE_ABS"
+          pnpm install --no-frozen-lockfile
+
           echo "=== Verifying expo was installed in the app package ==="
-          cd - > /dev/null
-          cd "$APP_DIR"
+          cd "$APP_ABS"
 
           if ! pnpm list expo --depth 0 2>/dev/null | grep -q expo; then
-            echo "ERROR: 'expo' did not resolve into $APP_DIR/node_modules."
-            echo "--- package.json dependencies ---"
-            cat package.json
+            echo "ERROR: 'expo' still did not resolve into $APP_ABS/node_modules."
+            echo "--- Workspace packages pnpm recognizes now ---"
+            cd "$WORKSPACE_ABS" && pnpm -r exec -- pwd 2>/dev/null || true
             exit 1
           fi
 
           if [ ! -e "./node_modules/.bin/expo" ]; then
             echo "ERROR: expo resolved but node_modules/.bin/expo was not created."
-            echo "--- node_modules/.bin contents ---"
             ls -la node_modules/.bin | head -50
             exit 1
           fi
