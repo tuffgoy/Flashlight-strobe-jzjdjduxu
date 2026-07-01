@@ -4,11 +4,14 @@ workflows:
     max_build_duration: 90
     environment:
       java: 17
+      node: 20.17.0
       groups:
         - SUPABASE
         - CM
       vars:
         COREPACK_ENABLE_STRICT: "0"
+        WORKSPACE_DIR: flashlight-strobe-github
+        APP_SUBDIR: flashlight-strobe
     cache:
       cache_paths:
         - ~/.gradle/caches
@@ -27,8 +30,10 @@ workflows:
         script: |
           echo "=== pwd ===" && pwd
           echo "=== root ===" && ls -la
-          echo "=== pnpm-workspace.yaml locations ===" && find . -maxdepth 5 -name "pnpm-workspace.yaml" 2>/dev/null
-          echo "=== app.json locations ===" && find . -maxdepth 5 -name "app.json" 2>/dev/null
+          find . -maxdepth 5 -name "pnpm-workspace.yaml" 2>/dev/null
+          find . -maxdepth 5 -name "app.json" 2>/dev/null
+          node --version
+          java -version
 
       - name: Install pnpm
         script: |
@@ -38,45 +43,21 @@ workflows:
 
       - name: Install JS dependencies
         script: |
-          # Find pnpm-workspace.yaml — that's the workspace root
-          WORKSPACE=$(find . -maxdepth 5 -name "pnpm-workspace.yaml" | head -1 | xargs dirname)
-          echo "Workspace root: $WORKSPACE"
-          cd "$WORKSPACE"
+          cd "$WORKSPACE_DIR"
           pnpm install --no-frozen-lockfile
 
-      - name: Expo prebuild (generate Android project)
+      - name: Expo prebuild — generate Android native project
         script: |
-          WORKSPACE=$(find . -maxdepth 5 -name "pnpm-workspace.yaml" | head -1 | xargs dirname)
-          cd "$WORKSPACE"
-          APP_DIR=$(find . -maxdepth 4 -name "app.json" -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
-          echo "App dir: $APP_DIR"
-          cd "$APP_DIR"
-          # Use workspace node_modules expo binary
-          if [ -f "node_modules/.bin/expo" ]; then
-            ./node_modules/.bin/expo prebuild --platform android --clean --no-install
-          elif [ -f "../../node_modules/.bin/expo" ]; then
-            ../../node_modules/.bin/expo prebuild --platform android --clean --no-install
-          elif [ -f "../node_modules/.bin/expo" ]; then
-            ../node_modules/.bin/expo prebuild --platform android --clean --no-install
-          else
-            echo "ERROR: expo binary not found. Install may have failed."
-            find "$OLDPWD" -maxdepth 6 -name "expo" -path "*/node_modules/.bin/*" 2>/dev/null
-            exit 1
-          fi
+          cd "$WORKSPACE_DIR/$APP_SUBDIR"
+          pnpm exec expo prebuild --platform android --clean --no-install
 
       - name: Set Android SDK path
         script: |
-          WORKSPACE=$(find . -maxdepth 5 -name "pnpm-workspace.yaml" | head -1 | xargs dirname)
-          cd "$WORKSPACE"
-          APP_DIR=$(find . -maxdepth 4 -name "app.json" -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
-          echo "sdk.dir=$ANDROID_SDK_ROOT" > "$APP_DIR/android/local.properties"
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > "$WORKSPACE_DIR/$APP_SUBDIR/android/local.properties"
 
       - name: Configure release keystore
         script: |
-          WORKSPACE=$(find . -maxdepth 5 -name "pnpm-workspace.yaml" | head -1 | xargs dirname)
-          cd "$WORKSPACE"
-          APP_DIR=$(find . -maxdepth 4 -name "app.json" -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
-          ANDROID_DIR="$APP_DIR/android"
+          ANDROID_DIR="$WORKSPACE_DIR/$APP_SUBDIR/android"
           APP_GRADLE="$ANDROID_DIR/app/build.gradle"
 
           echo "Decoding keystore..."
@@ -110,10 +91,7 @@ workflows:
 
       - name: Build release APK
         script: |
-          WORKSPACE=$(find . -maxdepth 5 -name "pnpm-workspace.yaml" | head -1 | xargs dirname)
-          cd "$WORKSPACE"
-          APP_DIR=$(find . -maxdepth 4 -name "app.json" -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
-          cd "$APP_DIR/android"
+          cd "$WORKSPACE_DIR/$APP_SUBDIR/android"
           chmod +x ./gradlew
           ./gradlew assembleRelease --no-daemon
 
@@ -131,12 +109,11 @@ workflows:
               exit 0
             fi
 
-            APK=$(find . -path "*/app/build/outputs/apk/*.apk" 2>/dev/null \
-               || find . -path "*/app/build/outputs/apk/**/*.apk" 2>/dev/null | head -1)
+            APK=$(find . -path "*/app/build/outputs/apk/release/*.apk" 2>/dev/null | head -1)
             if [ -z "$APK" ]; then echo "No APK found!"; exit 1; fi
 
-            APP_JSON=$(find . -maxdepth 6 -name "app.json" -exec grep -l '"expo"' {} \; 2>/dev/null | head -1)
-            VERSION=$(node -e "console.log(require('$APP_JSON').expo.version)")
+            APP_JSON="$WORKSPACE_DIR/$APP_SUBDIR/app.json"
+            VERSION=$(node -e "console.log(require('./$APP_JSON').expo.version)")
             TIMESTAMP=$(date +%Y%m%d-%H%M%S)
             VERSIONED="flashlight-strobe-v${VERSION}-${TIMESTAMP}.apk"
             LATEST="flashlight-strobe-latest.apk"
