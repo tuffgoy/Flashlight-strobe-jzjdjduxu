@@ -180,7 +180,8 @@ workflows:
           cd "$APP_ABS"
           NODE_ENV=production "$EXPO_BIN" export:embed \
             --platform android \
-            --entry-file expo-router/entry.js \
+            --project-root "$APP_ABS" \
+            --entry-file node_modules/expo-router/entry.js \
             --bundle-output android/app/src/main/assets/index.android.bundle \
             --assets-dest android/app/src/main/res \
             --dev false
