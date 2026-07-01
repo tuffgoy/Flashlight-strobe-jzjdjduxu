@@ -97,58 +97,46 @@ workflows:
           chmod +x ./gradlew
           ./gradlew assembleRelease --no-daemon --stacktrace 2>&1 | tail -150
 
+      - name: Upload APK to Supabase
+        script: |
+          set -e
+
+          if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_KEY" ] || [ -z "$SUPABASE_BUCKET" ]; then
+            echo "Supabase vars not set -- skipping upload."
+            exit 0
+          fi
+
+          RELEASE_DIR="$WORKSPACE_DIR/$APP_SUBDIR/android/app/build/outputs/apk/release"
+          APK=$(ls "$RELEASE_DIR"/*.apk 2>/dev/null | head -1)
+          if [ -z "$APK" ]; then
+            echo "No APK found in $RELEASE_DIR"
+            ls "$RELEASE_DIR" 2>/dev/null || echo "(directory missing)"
+            exit 1
+          fi
+          echo "Uploading: $APK"
+
+          APP_JSON="$WORKSPACE_DIR/$APP_SUBDIR/app.json"
+          VERSION=$(node -e "console.log(require('./$APP_JSON').expo.version)")
+          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+          VERSIONED="flashlight-strobe-v${VERSION}-${TIMESTAMP}.apk"
+          LATEST="flashlight-strobe-latest.apk"
+
+          upload() {
+            HTTP=$(curl -fsSL -o /dev/null -w "%{http_code}" \
+              -X POST \
+              "${SUPABASE_URL}/storage/v1/object/${SUPABASE_BUCKET}/$1?upsert=true" \
+              -H "Authorization: Bearer ${SUPABASE_KEY}" \
+              -H "Content-Type: application/octet-stream" \
+              -H "x-upsert: true" \
+              --data-binary @"${APK}")
+            echo "$1 -> HTTP $HTTP"
+            [ "$HTTP" -ge 200 ] && [ "$HTTP" -lt 300 ] || exit 1
+          }
+
+          upload "$VERSIONED"
+          upload "$LATEST"
+
+          echo "Done: ${SUPABASE_URL}/storage/v1/object/public/${SUPABASE_BUCKET}/${LATEST}"
+
     artifacts:
       - "**/app/build/outputs/apk/**/*.apk"
-
-    publishing:
-      scripts:
-        - name: Upload APK to Supabase
-          script: |
-            set -e
-
-            if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_KEY" ] || [ -z "$SUPABASE_BUCKET" ]; then
-              echo "Supabase vars not set -- skipping upload."
-              exit 0
-            fi
-
-            echo "=== CM_EXPORT_DIR: $CM_EXPORT_DIR ==="
-            ls "$CM_EXPORT_DIR" 2>/dev/null || echo "(export dir empty or missing)"
-
-            # Publishing scripts run after artifact collection; APKs are in CM_EXPORT_DIR
-            APK=$(find "$CM_EXPORT_DIR" -name "*.apk" 2>/dev/null | head -1)
-
-            # Fallback: look in the build output directory directly
-            if [ -z "$APK" ]; then
-              RELEASE_DIR="$WORKSPACE_DIR/$APP_SUBDIR/android/app/build/outputs/apk/release"
-              APK=$(ls "$RELEASE_DIR"/*.apk 2>/dev/null | head -1)
-            fi
-
-            if [ -z "$APK" ]; then
-              echo "No APK found in CM_EXPORT_DIR or build outputs. Listing all .apk files on disk:"
-              find / -name "*.apk" 2>/dev/null || true
-              exit 1
-            fi
-            echo "Found APK: $APK"
-
-            APP_JSON="$WORKSPACE_DIR/$APP_SUBDIR/app.json"
-            VERSION=$(node -e "console.log(require('./$APP_JSON').expo.version)")
-            TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-            VERSIONED="flashlight-strobe-v${VERSION}-${TIMESTAMP}.apk"
-            LATEST="flashlight-strobe-latest.apk"
-
-            upload() {
-              HTTP=$(curl -fsSL -o /dev/null -w "%{http_code}" \
-                -X POST \
-                "${SUPABASE_URL}/storage/v1/object/${SUPABASE_BUCKET}/$1?upsert=true" \
-                -H "Authorization: Bearer ${SUPABASE_KEY}" \
-                -H "Content-Type: application/octet-stream" \
-                -H "x-upsert: true" \
-                --data-binary @"${APK}")
-              echo "$1 -> HTTP $HTTP"
-              [ "$HTTP" -ge 200 ] && [ "$HTTP" -lt 300 ] || exit 1
-            }
-
-            upload "$VERSIONED"
-            upload "$LATEST"
-
-            echo "Done: ${SUPABASE_URL}/storage/v1/object/public/${SUPABASE_BUCKET}/${LATEST}"
