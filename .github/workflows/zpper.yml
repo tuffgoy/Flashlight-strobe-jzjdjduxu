@@ -1,30 +1,44 @@
-name: Auto-Zip Flashlight Folder
+name: Auto-Zip and Commit Folder
 
 on:
   push:
-    branches:
-      - main # Change to your default branch if needed
+    branches: [ "main" ]
     paths:
-      - 'flashlight-strobe-github/**' # Trigger only when files in this folder change
-  workflow_dispatch: # Allows manual triggering if needed
+      - 'flashlight-strobe-github/**' # Triggers only when files inside this folder change
+  workflow_dispatch:
 
 jobs:
-  zip-project:
+  zip-and-push:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
-      # Step 1: Check out the repository content
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Step 2: Zip the existing folder
+      # Step 1: Check if the folder exists, then zip it
       - name: Create Zip Archive
         run: |
-          zip -r flashlight-strobe-github1.zip flashlight-strobe-github
+          if [ -d "flashlight-strobe-github" ]; then
+            zip -r flashlight-strobe-github1.zip flashlight-strobe-github
+            echo "Successfully zipped folder."
+          else
+            echo "Error: flashlight-strobe-github folder not found!"
+            exit 1
+          fi
 
-      # Step 3: Upload the zip file as an artifact
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: flashlight-strobe-zip
-          path: flashlight-strobe-github1.zip
+      # Step 2: Commit the new zip file back into the repository root
+      - name: Commit and Push Zip
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          
+          git add flashlight-strobe-github1.zip
+          
+          if git diff-index --quiet HEAD; then
+            echo "No changes in the zip archive to commit"
+          else
+            git commit -m "Automated update of flashlight-strobe-github1.zip"
+            git push
+          fi
