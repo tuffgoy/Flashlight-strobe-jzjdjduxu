@@ -31,6 +31,8 @@ workflows:
           ls -la
           echo "=== All app.json files found ==="
           find . -maxdepth 4 -name "app.json" 2>/dev/null
+          echo "=== All pnpm-workspace.yaml files found ==="
+          find . -maxdepth 5 -name "pnpm-workspace.yaml" 2>/dev/null
 
       - name: Install pnpm
         script: |
@@ -45,19 +47,39 @@ workflows:
             -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
           echo "Expo app found at: $APP_DIR"
 
-          cd "$APP_DIR"
-          pnpm install --no-frozen-lockfile
+          # This app's package.json uses pnpm's "catalog:" and "workspace:*"
+          # specifiers, which only resolve from within a real pnpm workspace.
+          # Find the nearest ancestor directory that owns pnpm-workspace.yaml
+          # and install from there instead of from the nested app folder.
+          WORKSPACE_YAML=$(find . -maxdepth 5 -name "pnpm-workspace.yaml" 2>/dev/null | head -1)
 
-          echo "=== Verifying expo was installed ==="
+          if [ -n "$WORKSPACE_YAML" ]; then
+            WORKSPACE_ROOT=$(dirname "$WORKSPACE_YAML")
+            echo "Found pnpm workspace root at: $WORKSPACE_ROOT"
+            cd "$WORKSPACE_ROOT"
+            pnpm install --no-frozen-lockfile
+          else
+            echo "WARNING: no pnpm-workspace.yaml found within depth 5."
+            echo "This package.json references 'catalog:' / 'workspace:*' deps,"
+            echo "which cannot resolve without a workspace root. Installing"
+            echo "directly in the app folder anyway, but this will likely fail."
+            cd "$APP_DIR"
+            pnpm install --no-frozen-lockfile
+          fi
+
+          echo "=== Verifying expo was installed in the app package ==="
+          cd - > /dev/null
+          cd "$APP_DIR"
+
           if ! pnpm list expo --depth 0 2>/dev/null | grep -q expo; then
-            echo "ERROR: 'expo' is not listed in this project's dependencies (or failed to install)."
+            echo "ERROR: 'expo' did not resolve into $APP_DIR/node_modules."
             echo "--- package.json dependencies ---"
             cat package.json
             exit 1
           fi
 
           if [ ! -e "./node_modules/.bin/expo" ]; then
-            echo "ERROR: expo is a declared dependency but node_modules/.bin/expo was not created."
+            echo "ERROR: expo resolved but node_modules/.bin/expo was not created."
             echo "--- node_modules/.bin contents ---"
             ls -la node_modules/.bin | head -50
             exit 1
