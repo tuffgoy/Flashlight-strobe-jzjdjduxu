@@ -1,16 +1,3 @@
-# ─────────────────────────────────────────────────────────────────────────────
-#  Codemagic CI/CD — Flashlight Strobe Android APK
-#
-#  Required Codemagic environment variable groups
-#  ──────────────────────────────────────────────
-#  Group "CM"       → CM_KEYSTORE (base64 .jks), CM_KEYSTORE_PASSWORD,
-#                     CM_KEY_ALIAS, CM_KEY_PASSWORD
-#  Group "SUPABASE" → SUPABASE_URL, SUPABASE_KEY, SUPABASE_BUCKET
-#
-#  Without CM_KEYSTORE the build falls back to an unsigned debug APK.
-#  Without SUPABASE_* the upload step is skipped silently.
-# ─────────────────────────────────────────────────────────────────────────────
-
 workflows:
   android-apk:
     name: Flashlight Strobe - Release APK
@@ -36,336 +23,93 @@ workflows:
           include: true
 
     scripts:
-      # ── 1. Show structure ─────────────────────────────────────────────────
-      - name: Show repo structure
+      - name: Install pnpm
         script: |
-          echo "=== pwd ===" && pwd
-          echo "=== root ===" && ls -la
-          find . -maxdepth 6 -name "pnpm-workspace.yaml" 2>/dev/null
-          find . -maxdepth 6 -name "app.json" 2>/dev/null | grep -v node_modules
+          npm install -g pnpm@9
+          pnpm --version
 
-      # ── 2. Install JS dependencies ─────────────────────────────────────────
-      #
-      #  KEY FIX: pnpm install MUST run from the workspace root
-      #  (the directory that contains pnpm-workspace.yaml), NOT from inside
-      #  the app sub-directory. Running it inside the app dir means pnpm
-      #  cannot find the catalog: entries (e.g. @tanstack/react-query@catalog:)
-      #  and fails with ERR_PNPM_SPEC_NOT_SUPPORTED_BY_ANY_RESOLVER.
-      #
-      - name: Install JS dependencies
+      - name: Install workspace dependencies
         script: |
-          set -e
-          corepack enable
-          corepack prepare pnpm@9 --activate
-
-          WORKSPACE_DIR=$(find . -maxdepth 6 -name "pnpm-workspace.yaml" 2>/dev/null | head -1 | xargs dirname)
-          APP_DIR=$(find . -maxdepth 6 -name "app.json" -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
-          echo "Workspace dir: $WORKSPACE_DIR"
-          echo "App dir:       $APP_DIR"
-
-          cd "$WORKSPACE_DIR"
+          cd flashlight-strobe-github
           pnpm install --no-frozen-lockfile
 
-          echo "--- installed expo version ---"
-          find . -path "*/expo/package.json" | grep -v "node_modules/.pnpm" | head -1 | xargs grep '"version"' | head -1
-
-      # ── 3. Expo prebuild ───────────────────────────────────────────────────
-      - name: Expo prebuild (generate Android project)
+      - name: Expo prebuild
         script: |
-          set -e
-          APP_DIR=$(find . -maxdepth 6 -name "app.json" -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
-          echo "Running prebuild in: $APP_DIR"
-          cd "$APP_DIR"
+          cd flashlight-strobe-github/flashlight-strobe
           npx expo prebuild --platform android --clean --no-install
 
-      # ── 4. Set Android SDK path ────────────────────────────────────────────
       - name: Set Android SDK path
         script: |
-          set -e
-          APP_DIR=$(find . -maxdepth 6 -name "app.json" -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
-          echo "sdk.dir=$ANDROID_SDK_ROOT" > "$APP_DIR/android/local.properties"
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > flashlight-strobe-github/flashlight-strobe/android/local.properties
 
-      # ── 5. Configure release keystore ──────────────────────────────────────
-      #
-      #  NOTE: No heredocs are used here. Heredoc content at column 0 breaks
-      #  YAML block scalar parsing. All multi-line output uses printf instead.
-      #
       - name: Configure release keystore
         script: |
           set -e
-          APP_DIR=$(find . -maxdepth 6 -name "app.json" -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
-          ANDROID_DIR="$APP_DIR/android"
-          APP_GRADLE="$ANDROID_DIR/app/build.gradle"
-
+          ANDROID_DIR="flashlight-strobe-github/flashlight-strobe/android"
           if [ -z "$CM_KEYSTORE" ]; then
-            echo "No CM_KEYSTORE provided — will build unsigned debug APK."
+            echo "No keystore provided - building unsigned debug APK"
             exit 0
           fi
-
-          echo "Decoding keystore..."
           echo "$CM_KEYSTORE" | base64 --decode > "$ANDROID_DIR/app/release.keystore"
-
           printf 'MYAPP_RELEASE_STORE_FILE=release.keystore\n' >> "$ANDROID_DIR/gradle.properties"
           printf 'MYAPP_RELEASE_KEY_ALIAS=%s\n' "$CM_KEY_ALIAS" >> "$ANDROID_DIR/gradle.properties"
           printf 'MYAPP_RELEASE_STORE_PASSWORD=%s\n' "$CM_KEYSTORE_PASSWORD" >> "$ANDROID_DIR/gradle.properties"
           printf 'MYAPP_RELEASE_KEY_PASSWORD=%s\n' "$CM_KEY_PASSWORD" >> "$ANDROID_DIR/gradle.properties"
-
-          export APP_GRADLE
+          export GRADLE_FILE="$ANDROID_DIR/app/build.gradle"
           node -e '
-            const fs = require("fs");
-            const file = process.env.APP_GRADLE;
-            let src = fs.readFileSync(file, "utf8");
-            const block = [
-              "\n    release {",
-              "        storeFile file(MYAPP_RELEASE_STORE_FILE)",
-              "        storePassword MYAPP_RELEASE_STORE_PASSWORD",
-              "        keyAlias MYAPP_RELEASE_KEY_ALIAS",
-              "        keyPassword MYAPP_RELEASE_KEY_PASSWORD",
-              "    }"
-            ].join("\n");
-            if (!src.includes("MYAPP_RELEASE_STORE_FILE")) {
-              src = src.replace(/signingConfigs\s*\{/, "signingConfigs {" + block);
+            var fs = require("fs");
+            var f = process.env.GRADLE_FILE;
+            var s = fs.readFileSync(f, "utf8");
+            var b = "\n    release {\n        storeFile file(MYAPP_RELEASE_STORE_FILE)\n        storePassword MYAPP_RELEASE_STORE_PASSWORD\n        keyAlias MYAPP_RELEASE_KEY_ALIAS\n        keyPassword MYAPP_RELEASE_KEY_PASSWORD\n    }";
+            if (s.indexOf("MYAPP_RELEASE_STORE_FILE") === -1) {
+              s = s.replace(/signingConfigs\s*\{/, "signingConfigs {" + b);
             }
-            src = src.replace(/signingConfig signingConfigs\.debug/g, "signingConfig signingConfigs.release");
-            fs.writeFileSync(file, src);
-            console.log("build.gradle patched for release signing.");
+            s = s.replace(/signingConfig signingConfigs\.debug/g, "signingConfig signingConfigs.release");
+            fs.writeFileSync(f, s);
+            console.log("build.gradle patched");
           '
 
-      # ── 6. Build APK ──────────────────────────────────────────────────────
-      - name: Build release APK
+      - name: Build APK
         script: |
           set -e
-          APP_DIR=$(find . -maxdepth 6 -name "app.json" -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
-          cd "$APP_DIR/android"
+          cd flashlight-strobe-github/flashlight-strobe/android
           chmod +x ./gradlew
           if [ -n "$CM_KEYSTORE" ]; then
-            echo "Building signed release APK..."
             ./gradlew assembleRelease --no-daemon
           else
-            echo "Building unsigned debug APK..."
             ./gradlew assembleDebug --no-daemon
           fi
 
-    # ── Artifacts ──────────────────────────────────────────────────────────
     artifacts:
       - "**/app/build/outputs/apk/**/*.apk"
 
-    # ── Post-build: upload to Supabase Storage ─────────────────────────────
     publishing:
       scripts:
         - name: Upload APK to Supabase
           script: |
             set -e
-
             if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_KEY" ] || [ -z "$SUPABASE_BUCKET" ]; then
-              echo "SUPABASE_URL / SUPABASE_KEY / SUPABASE_BUCKET not set — skipping upload."
+              echo "Supabase vars not set - skipping upload"
               exit 0
             fi
-
-            APK=$(find . -path "*/app/build/outputs/apk/**/*.apk" 2>/dev/null | head -1)
+            APK=$(find . -name "*.apk" -path "*/outputs/apk/*" | head -1)
             if [ -z "$APK" ]; then
-              echo "ERROR: No APK found under */app/build/outputs/apk/*"
-              APK=$(find . -name "*.apk" 2>/dev/null | head -1)
-              if [ -z "$APK" ]; then
-                echo "No APK found anywhere — build may have failed silently."
-                exit 1
-              fi
+              echo "No APK found"
+              exit 1
             fi
-            echo "Found APK: $APK"
-
-            APP_JSON=$(find . -maxdepth 6 -name "app.json" -exec grep -l '"expo"' {} \; 2>/dev/null | head -1)
-            VERSION=$(node -e "console.log(require('$(pwd)/$APP_JSON').expo.version)")
-            TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-            VERSIONED="flashlight-strobe-v${VERSION}-${TIMESTAMP}.apk"
+            echo "Found APK at $APK"
+            VERSION=$(node -e "console.log(require('./flashlight-strobe-github/flashlight-strobe/app.json').expo.version)")
+            STAMP=$(date +%Y%m%d-%H%M%S)
+            NAMED="flashlight-strobe-v${VERSION}-${STAMP}.apk"
             LATEST="flashlight-strobe-latest.apk"
-
-            upload_apk() {
-              local DEST_NAME=$1
-              echo "Uploading → $DEST_NAME"
-              HTTP_CODE=$(curl -fsSL -o /dev/null -w "%{http_code}" \
-                -X POST \
-                "${SUPABASE_URL}/storage/v1/object/${SUPABASE_BUCKET}/${DEST_NAME}?upsert=true" \
+            for DEST in "$NAMED" "$LATEST"; do
+              CODE=$(curl -fsSL -o /dev/null -w "%{http_code}" \
+                -X POST "${SUPABASE_URL}/storage/v1/object/${SUPABASE_BUCKET}/${DEST}?upsert=true" \
                 -H "Authorization: Bearer ${SUPABASE_KEY}" \
                 -H "Content-Type: application/octet-stream" \
                 -H "x-upsert: true" \
-                --data-binary @"${APK}")
-              if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
-                echo "OK  $DEST_NAME uploaded (HTTP $HTTP_CODE)"
-              else
-                echo "FAIL  Upload failed for $DEST_NAME (HTTP $HTTP_CODE)"
-                exit 1
-              fi
-            }
-
-            upload_apk "$VERSIONED"
-            upload_apk "$LATEST"
-
-            echo ""
-            echo "APK available at:"
-            echo "  Latest:    ${SUPABASE_URL}/storage/v1/object/public/${SUPABASE_BUCKET}/${LATEST}"
-            echo "  Versioned: ${SUPABASE_URL}/storage/v1/object/public/${SUPABASE_BUCKET}/${VERSIONED}"
-            echo ""
-            echo "Remote config update:"
-            printf '  { "latestApkVersion": "%s", "apkDownloadUrl": "%s/storage/v1/object/public/%s/%s" }\n' \
-              "$VERSION" "$SUPABASE_URL" "$SUPABASE_BUCKET" "$LATEST"
-          WORKSPACE_DIR=$(find . -maxdepth 6 -name "pnpm-workspace.yaml" 2>/dev/null | head -1 | xargs dirname)
-          echo "Workspace dir: $WORKSPACE_DIR"
-
-          # Find the app dir (contains app.json with "expo")
-          APP_DIR=$(find . -maxdepth 6 -name "app.json" -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
-          echo "App dir: $APP_DIR"
-
-          # Install from workspace root so catalog: references resolve correctly
-          cd "$WORKSPACE_DIR"
-          pnpm install --no-frozen-lockfile
-
-          echo "--- installed expo version ---"
-          cat "$OLDPWD/$APP_DIR/node_modules/expo/package.json" 2>/dev/null | grep '"version"' | head -1 || \
-            find . -path "*/expo/package.json" | head -1 | xargs grep '"version"' | head -1
-
-      # ── 3. Expo prebuild ───────────────────────────────────────────────────
-      - name: Expo prebuild (generate Android project)
-        script: |
-          set -e
-          APP_DIR=$(find . -maxdepth 6 -name "app.json" -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
-          echo "Running prebuild in: $APP_DIR"
-          cd "$APP_DIR"
-          npx expo prebuild --platform android --clean --no-install
-
-      # ── 4. Set Android SDK path ────────────────────────────────────────────
-      - name: Set Android SDK path
-        script: |
-          echo "sdk.dir=$ANDROID_SDK_ROOT" > \
-            "$(find . -maxdepth 8 -name "app.json" -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)/android/local.properties"
-
-      # ── 5. Configure release keystore ──────────────────────────────────────
-      - name: Configure release keystore
-        script: |
-          set -e
-          APP_DIR=$(find . -maxdepth 6 -name "app.json" -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
-          ANDROID_DIR="$APP_DIR/android"
-          APP_GRADLE="$ANDROID_DIR/app/build.gradle"
-
-          if [ -z "$CM_KEYSTORE" ]; then
-            echo "No CM_KEYSTORE provided — will build unsigned debug APK."
-            exit 0
-          fi
-
-          echo "Decoding keystore..."
-          echo "$CM_KEYSTORE" | base64 --decode > "$ANDROID_DIR/app/release.keystore"
-
-          cat >> "$ANDROID_DIR/gradle.properties" << PROPS
-MYAPP_RELEASE_STORE_FILE=release.keystore
-MYAPP_RELEASE_KEY_ALIAS=${CM_KEY_ALIAS}
-MYAPP_RELEASE_STORE_PASSWORD=${CM_KEYSTORE_PASSWORD}
-MYAPP_RELEASE_KEY_PASSWORD=${CM_KEY_PASSWORD}
-PROPS
-
-          export APP_GRADLE
-
-          node <<'NODE'
-const fs = require('fs');
-const file = process.env.APP_GRADLE;
-let src = fs.readFileSync(file, 'utf8');
-
-const block = `
-    release {
-        storeFile file(MYAPP_RELEASE_STORE_FILE)
-        storePassword MYAPP_RELEASE_STORE_PASSWORD
-        keyAlias MYAPP_RELEASE_KEY_ALIAS
-        keyPassword MYAPP_RELEASE_KEY_PASSWORD
-    }`;
-
-if (!src.includes('MYAPP_RELEASE_STORE_FILE')) {
-  src = src.replace(/signingConfigs\s*\{/, 'signingConfigs {' + block);
-}
-
-src = src.replace(
-  /signingConfig signingConfigs\.debug/g,
-  'signingConfig signingConfigs.release'
-);
-
-fs.writeFileSync(file, src);
-console.log('build.gradle patched for release signing.');
-NODE
-
-      # ── 6. Build APK ──────────────────────────────────────────────────────
-      - name: Build release APK
-        script: |
-          set -e
-          APP_DIR=$(find . -maxdepth 6 -name "app.json" -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
-          cd "$APP_DIR/android"
-          chmod +x ./gradlew
-          if [ -n "$CM_KEYSTORE" ]; then
-            echo "Building signed release APK..."
-            ./gradlew assembleRelease --no-daemon
-          else
-            echo "Building unsigned debug APK..."
-            ./gradlew assembleDebug --no-daemon
-          fi
-
-    # ── Artifacts ──────────────────────────────────────────────────────────
-    artifacts:
-      - "**/app/build/outputs/apk/**/*.apk"
-
-    # ── Post-build: upload to Supabase Storage ─────────────────────────────
-    publishing:
-      scripts:
-        - name: Upload APK to Supabase
-          script: |
-            #!/usr/bin/env bash
-            set -e
-
-            if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_KEY" ] || [ -z "$SUPABASE_BUCKET" ]; then
-              echo "SUPABASE_URL / SUPABASE_KEY / SUPABASE_BUCKET not set — skipping upload."
-              exit 0
-            fi
-
-            APK=$(find . -path "*/app/build/outputs/apk/**/*.apk" | head -1)
-            if [ -z "$APK" ]; then
-              echo "ERROR: No APK found under */app/build/outputs/apk/*"
-              echo "Searching broadly for any .apk..."
-              APK=$(find . -name "*.apk" | head -1)
-              if [ -z "$APK" ]; then
-                echo "No APK found anywhere — build may have failed silently."
-                exit 1
-              fi
-            fi
-
-            echo "Found APK: $APK"
-
-            APP_JSON=$(find . -maxdepth 6 -name "app.json" -exec grep -l '"expo"' {} \; 2>/dev/null | head -1)
-            VERSION=$(node -e "console.log(require('$APP_JSON').expo.version)")
-            TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-            VERSIONED="flashlight-strobe-v${VERSION}-${TIMESTAMP}.apk"
-            LATEST="flashlight-strobe-latest.apk"
-
-            upload_apk() {
-              local DEST_NAME=$1
-              echo "Uploading → $DEST_NAME"
-              HTTP_CODE=$(curl -fsSL -o /dev/null -w "%{http_code}" \
-                -X POST \
-                "${SUPABASE_URL}/storage/v1/object/${SUPABASE_BUCKET}/${DEST_NAME}?upsert=true" \
-                -H "Authorization: Bearer ${SUPABASE_KEY}" \
-                -H "Content-Type: application/octet-stream" \
-                -H "x-upsert: true" \
-                --data-binary @"${APK}")
-              if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
-                echo "✅  $DEST_NAME uploaded (HTTP $HTTP_CODE)"
-              else
-                echo "❌  Upload failed for $DEST_NAME (HTTP $HTTP_CODE)"
-                exit 1
-              fi
-            }
-
-            upload_apk "$VERSIONED"
-            upload_apk "$LATEST"
-
-            echo ""
-            echo "🚀  APK available at:"
-            echo "    Latest:    ${SUPABASE_URL}/storage/v1/object/public/${SUPABASE_BUCKET}/${LATEST}"
-            echo "    Versioned: ${SUPABASE_URL}/storage/v1/object/public/${SUPABASE_BUCKET}/${VERSIONED}"
-            echo ""
-            echo "Remote config update:"
-            echo "  { \"latestApkVersion\": \"${VERSION}\","
-            echo "    \"apkDownloadUrl\": \"${SUPABASE_URL}/storage/v1/object/public/${SUPABASE_BUCKET}/${LATEST}\" }"
+                --data-binary @"$APK")
+              echo "$DEST uploaded with HTTP $CODE"
+              if [ "$CODE" -lt 200 ] || [ "$CODE" -ge 300 ]; then exit 1; fi
+            done
+            echo "Latest APK at ${SUPABASE_URL}/storage/v1/object/public/${SUPABASE_BUCKET}/${LATEST}"
