@@ -4,19 +4,15 @@ workflows:
     max_build_duration: 90
     environment:
       java: 17
-      node: 20.17.0
       groups:
         - SUPABASE
         - CM
-      vars:
-        COREPACK_ENABLE_STRICT: "0"
-        WORKSPACE_DIR: flashlight-strobe-github
-        APP_SUBDIR: flashlight-strobe
+
     cache:
       cache_paths:
         - ~/.gradle/caches
         - ~/.gradle/wrapper
-        - $HOME/.cache/pnpm
+        - ~/.npm
 
     triggering:
       events:
@@ -30,134 +26,132 @@ workflows:
         script: |
           echo "=== pwd ===" && pwd
           echo "=== root ===" && ls -la
-          find . -maxdepth 5 -name "pnpm-workspace.yaml" 2>/dev/null
-          find . -maxdepth 5 -name "app.json" 2>/dev/null
-          node --version
-          java -version
-
-      - name: Install pnpm
-        script: |
-          corepack disable || true
-          npm install -g pnpm@9 --force
-          pnpm --version
-
-      - name: Patch workspace config
-        script: |
-          cd "$WORKSPACE_DIR"
-
-          sed -i 's|  - artifacts/\*|  - flashlight-strobe|' pnpm-workspace.yaml
-          sed -i '/^  - lib\/\*/d' pnpm-workspace.yaml
-          sed -i '/^  - lib\/integrations\/\*/d' pnpm-workspace.yaml
-          sed -i '/^  - scripts/d' pnpm-workspace.yaml
-          echo "pnpm-workspace.yaml packages:"
-          grep -A4 "^packages:" pnpm-workspace.yaml
-
-          node -e "const fs=require('fs');const pkg=JSON.parse(fs.readFileSync('$APP_SUBDIR/package.json','utf8'));delete (pkg.devDependencies||{})['@workspace/api-client-react'];fs.writeFileSync('$APP_SUBDIR/package.json',JSON.stringify(pkg,null,2)+'\n');console.log('removed @workspace/api-client-react');"
-
-      - name: Patch iOS-only source files for Android build
-        script: |
-          cd "$WORKSPACE_DIR/$APP_SUBDIR"
-
-          echo aW1wb3J0IFJlYWN0IGZyb20gJ3JlYWN0JzsKaW1wb3J0IHsgUGxhdGZvcm0sIFN0eWxlU2hlZXQsIHVzZUNvbG9yU2NoZW1lLCBWaWV3IH0gZnJvbSAncmVhY3QtbmF0aXZlJzsKaW1wb3J0IHsgRmVhdGhlciB9IGZyb20gJ0BleHBvL3ZlY3Rvci1pY29ucyc7CmltcG9ydCB7IEJsdXJWaWV3IH0gZnJvbSAnZXhwby1ibHVyJzsKaW1wb3J0IHsgVGFicyB9IGZyb20gJ2V4cG8tcm91dGVyJzsKaW1wb3J0IHsgdXNlQ29sb3JzIH0gZnJvbSAnQC9ob29rcy91c2VDb2xvcnMnOwoKZXhwb3J0IGRlZmF1bHQgZnVuY3Rpb24gVGFiTGF5b3V0KCkgewogIGNvbnN0IGNvbG9ycyA9IHVzZUNvbG9ycygpOwogIGNvbnN0IGNvbG9yU2NoZW1lID0gdXNlQ29sb3JTY2hlbWUoKTsKICBjb25zdCBpc0RhcmsgPSBjb2xvclNjaGVtZSA9PT0gJ2RhcmsnOwogIGNvbnN0IGlzSU9TID0gUGxhdGZvcm0uT1MgPT09ICdpb3MnOwogIGNvbnN0IGlzV2ViID0gUGxhdGZvcm0uT1MgPT09ICd3ZWInOwoKICByZXR1cm4gKAogICAgPFRhYnMKICAgICAgc2NyZWVuT3B0aW9ucz17ewogICAgICAgIHRhYkJhckFjdGl2ZVRpbnRDb2xvcjogY29sb3JzLnByaW1hcnksCiAgICAgICAgdGFiQmFySW5hY3RpdmVUaW50Q29sb3I6IGNvbG9ycy5tdXRlZEZvcmVncm91bmQsCiAgICAgICAgaGVhZGVyU2hvd246IHRydWUsCiAgICAgICAgaGVhZGVyU3R5bGU6IHsgYmFja2dyb3VuZENvbG9yOiBjb2xvcnMuYmFja2dyb3VuZCB9LAogICAgICAgIGhlYWRlclRpdGxlU3R5bGU6IHsKICAgICAgICAgIGNvbG9yOiBjb2xvcnMuZm9yZWdyb3VuZCwKICAgICAgICAgIGZvbnRGYW1pbHk6ICdJbnRlcl83MDBCb2xkJywKICAgICAgICAgIGxldHRlclNwYWNpbmc6IDIsCiAgICAgICAgICBmb250U2l6ZTogMTMsCiAgICAgICAgfSwKICAgICAgICBoZWFkZXJUaW50Q29sb3I6IGNvbG9ycy5mb3JlZ3JvdW5kLAogICAgICAgIHRhYkJhclN0eWxlOiB7CiAgICAgICAgICBwb3NpdGlvbjogJ2Fic29sdXRlJywKICAgICAgICAgIGJhY2tncm91bmRDb2xvcjogaXNJT1MgPyAndHJhbnNwYXJlbnQnIDogY29sb3JzLmJhY2tncm91bmQsCiAgICAgICAgICBib3JkZXJUb3BXaWR0aDogMSwKICAgICAgICAgIGJvcmRlclRvcENvbG9yOiBjb2xvcnMuYm9yZGVyLAogICAgICAgICAgZWxldmF0aW9uOiAwLAogICAgICAgICAgaGVpZ2h0OiBpc1dlYiA/IDg0IDogdW5kZWZpbmVkLAogICAgICAgIH0sCiAgICAgICAgdGFiQmFyTGFiZWxTdHlsZTogewogICAgICAgICAgZm9udEZhbWlseTogJ0ludGVyXzUwME1lZGl1bScsCiAgICAgICAgICBmb250U2l6ZTogMTAsCiAgICAgICAgICBsZXR0ZXJTcGFjaW5nOiAwLjUsCiAgICAgICAgfSwKICAgICAgICB0YWJCYXJCYWNrZ3JvdW5kOiAoKSA9PgogICAgICAgICAgaXNJT1MgPyAoCiAgICAgICAgICAgIDxCbHVyVmlldyBpbnRlbnNpdHk9ezEwMH0gdGludD0iZGFyayIgc3R5bGU9e1N0eWxlU2hlZXQuYWJzb2x1dGVGaWxsfSAvPgogICAgICAgICAgKSA6IGlzV2ViID8gKAogICAgICAgICAgICA8VmlldyBzdHlsZT17W1N0eWxlU2hlZXQuYWJzb2x1dGVGaWxsLCB7IGJhY2tncm91bmRDb2xvcjogY29sb3JzLmJhY2tncm91bmQgfV19IC8+CiAgICAgICAgICApIDogbnVsbCwKICAgICAgfX0KICAgID4KICAgICAgPFRhYnMuU2NyZWVuCiAgICAgICAgbmFtZT0iaW5kZXgiCiAgICAgICAgb3B0aW9ucz17ewogICAgICAgICAgdGl0bGU6ICdTVFJPQkUnLAogICAgICAgICAgdGFiQmFyTGFiZWw6ICdTdHJvYmUnLAogICAgICAgICAgdGFiQmFySWNvbjogKHsgY29sb3IgfSkgPT4gPEZlYXRoZXIgbmFtZT0iemFwIiBzaXplPXsyMH0gY29sb3I9e2NvbG9yfSAvPiwKICAgICAgICB9fQogICAgICAvPgogICAgICA8VGFicy5TY3JlZW4KICAgICAgICBuYW1lPSJwYXR0ZXJucyIKICAgICAgICBvcHRpb25zPXt7CiAgICAgICAgICB0aXRsZTogJ1BBVFRFUk5TJywKICAgICAgICAgIHRhYkJhckxhYmVsOiAnUGF0dGVybnMnLAogICAgICAgICAgdGFiQmFySWNvbjogKHsgY29sb3IgfSkgPT4gPEZlYXRoZXIgbmFtZT0iZ3JpZCIgc2l6ZT17MjB9IGNvbG9yPXtjb2xvcn0gLz4sCiAgICAgICAgfX0KICAgICAgLz4KICAgICAgPFRhYnMuU2NyZWVuCiAgICAgICAgbmFtZT0ic2V0dGluZ3MiCiAgICAgICAgb3B0aW9ucz17ewogICAgICAgICAgdGl0bGU6ICdTRVRUSU5HUycsCiAgICAgICAgICB0YWJCYXJMYWJlbDogJ1NldHRpbmdzJywKICAgICAgICAgIHRhYkJhckljb246ICh7IGNvbG9yIH0pID0+IDxGZWF0aGVyIG5hbWU9InNldHRpbmdzIiBzaXplPXsyMH0gY29sb3I9e2NvbG9yfSAvPiwKICAgICAgICB9fQogICAgICAvPgogICAgPC9UYWJzPgogICk7Cn0K | base64 -d > "app/(tabs)/_layout.tsx"
-          echo "_layout.tsx: rewritten without iOS-only imports"
-
-          node -e "const fs=require('fs');const ts=JSON.parse(fs.readFileSync('tsconfig.json','utf8'));ts.references=(ts.references||[]).filter(function(r){return r.path.indexOf('api-client-react')===-1;});fs.writeFileSync('tsconfig.json',JSON.stringify(ts,null,2)+'\n');console.log('tsconfig.json: removed broken api-client-react reference');"
-
-          node -e "
-            const fs = require('fs');
-            const app = JSON.parse(fs.readFileSync('app.json', 'utf8'));
-            if (app.expo) {
-              if (app.expo.experiments) app.expo.experiments.reactCompiler = false;
-              app.expo.newArchEnabled = false;
-            }
-            fs.writeFileSync('app.json', JSON.stringify(app, null, 2) + '\n');
-            console.log('app.json patched: reactCompiler=false, newArchEnabled=false');
-          "
+          echo "=== app.json locations ==="
+          find . -maxdepth 6 -name "app.json" 2>/dev/null
+          echo "=== package.json locations ==="
+          find . -maxdepth 6 -name "package.json" 2>/dev/null | grep -v node_modules
 
       - name: Install JS dependencies
         script: |
-          cd "$WORKSPACE_DIR"
-          pnpm install --no-frozen-lockfile
+          set -e
+          APP_DIR=$(find . -maxdepth 6 -name "app.json" -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
+          echo "App dir: $APP_DIR"
+          cd "$APP_DIR"
+          echo "--- package.json ---"
+          cat package.json
+          echo "--- npm install ---"
+          npm install --legacy-peer-deps
+          echo "--- installed expo version ---"
+          cat node_modules/expo/package.json | grep '"version"' | head -1
 
-      - name: Expo prebuild - generate Android native project
+      - name: Expo prebuild (generate Android project)
         script: |
-          cd "$WORKSPACE_DIR/$APP_SUBDIR"
-          pnpm exec expo prebuild --platform android --clean --no-install
+          set -e
+          APP_DIR=$(find . -maxdepth 6 -name "app.json" -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
+          echo "App dir: $APP_DIR"
+          cd "$APP_DIR"
+          npx expo prebuild --platform android --clean --no-install
 
       - name: Set Android SDK path
         script: |
-          echo "sdk.dir=$ANDROID_SDK_ROOT" > "$WORKSPACE_DIR/$APP_SUBDIR/android/local.properties"
+          set -e
+          APP_DIR=$(find . -maxdepth 6 -name "app.json" -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > "$APP_DIR/android/local.properties"
+          echo "Wrote local.properties:"
+          cat "$APP_DIR/android/local.properties"
 
       - name: Configure release keystore
         script: |
-          ANDROID_DIR="$WORKSPACE_DIR/$APP_SUBDIR/android"
+          set -e
+          APP_DIR=$(find . -maxdepth 6 -name "app.json" -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
+          ANDROID_DIR="$APP_DIR/android"
           APP_GRADLE="$ANDROID_DIR/app/build.gradle"
 
           echo "Decoding keystore..."
           echo "$CM_KEYSTORE" | base64 --decode > "$ANDROID_DIR/app/release.keystore"
+          ls -lh "$ANDROID_DIR/app/release.keystore"
 
-          printf '\nMYAPP_RELEASE_STORE_FILE=release.keystore\nMYAPP_RELEASE_KEY_ALIAS=%s\nMYAPP_RELEASE_STORE_PASSWORD=%s\nMYAPP_RELEASE_KEY_PASSWORD=%s\n' "$CM_KEY_ALIAS" "$CM_KEYSTORE_PASSWORD" "$CM_KEY_PASSWORD" >> "$ANDROID_DIR/gradle.properties"
+          cat >> "$ANDROID_DIR/gradle.properties" << PROPS
+          MYAPP_RELEASE_STORE_FILE=release.keystore
+          MYAPP_RELEASE_KEY_ALIAS=${CM_KEY_ALIAS}
+          MYAPP_RELEASE_STORE_PASSWORD=${CM_KEYSTORE_PASSWORD}
+          MYAPP_RELEASE_KEY_PASSWORD=${CM_KEY_PASSWORD}
+          PROPS
 
-          node -e "const fs=require('fs');const file='$APP_GRADLE';let src=fs.readFileSync(file,'utf8');const block='\n              release {\n                  storeFile file(MYAPP_RELEASE_STORE_FILE)\n                  storePassword MYAPP_RELEASE_STORE_PASSWORD\n                  keyAlias MYAPP_RELEASE_KEY_ALIAS\n                  keyPassword MYAPP_RELEASE_KEY_PASSWORD\n              }';if(!src.includes('MYAPP_RELEASE_STORE_FILE')){src=src.replace(/signingConfigs\s*\{/,'signingConfigs {'+block);}src=src.replace(/signingConfig signingConfigs\.debug/g,'signingConfig signingConfigs.release');fs.writeFileSync(file,src);console.log('build.gradle patched.');"
-
-          echo "=== Signing section in build.gradle ==="
-          node -e "const fs=require('fs');const src=fs.readFileSync('$APP_GRADLE','utf8');const m=src.match(/signingConfigs[\s\S]{0,600}/);console.log(m?m[0].substring(0,600):'(signingConfigs not found - build.gradle may use Kotlin DSL)');"
+          node -e "
+            const fs = require('fs');
+            const file = '$APP_GRADLE';
+            let src = fs.readFileSync(file, 'utf8');
+            const block = \`
+              release {
+                  storeFile file(MYAPP_RELEASE_STORE_FILE)
+                  storePassword MYAPP_RELEASE_STORE_PASSWORD
+                  keyAlias MYAPP_RELEASE_KEY_ALIAS
+                  keyPassword MYAPP_RELEASE_KEY_PASSWORD
+              }\`;
+            if (!src.includes('MYAPP_RELEASE_STORE_FILE')) {
+              src = src.replace(/signingConfigs\s*\{/, 'signingConfigs {' + block);
+            }
+            src = src.replace(/signingConfig signingConfigs\.debug/g, 'signingConfig signingConfigs.release');
+            fs.writeFileSync(file, src);
+            console.log('build.gradle patched.');
+          "
 
       - name: Build release APK
         script: |
-          cd "$WORKSPACE_DIR/$APP_SUBDIR/android"
-          chmod +x ./gradlew
-          ./gradlew assembleRelease --no-daemon --stacktrace > /tmp/gradle-build.log 2>&1
-          BUILD_EXIT=$?
-          if [ $BUILD_EXIT -ne 0 ]; then
-            echo "=== GRADLE FAILED (exit $BUILD_EXIT) — last 300 lines ==="
-            tail -300 /tmp/gradle-build.log
-            exit $BUILD_EXIT
-          fi
-          echo "=== Gradle succeeded ==="
-          echo "=== APK locations ==="
-          find . -name "*.apk" 2>/dev/null || echo "No APKs found"
-
-      - name: Upload APK to Supabase
-        script: |
           set -e
-
-          if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_KEY" ] || [ -z "$SUPABASE_BUCKET" ]; then
-            echo "Supabase vars not set -- skipping upload."
-            exit 0
-          fi
-
-          RELEASE_DIR="$WORKSPACE_DIR/$APP_SUBDIR/android/app/build/outputs/apk/release"
-          APK=$(ls "$RELEASE_DIR"/*.apk 2>/dev/null | head -1)
-          if [ -z "$APK" ]; then
-            echo "No APK found in $RELEASE_DIR"
-            ls "$RELEASE_DIR" 2>/dev/null || echo "(directory missing)"
-            exit 1
-          fi
-          echo "Uploading: $APK"
-
-          APP_JSON="$WORKSPACE_DIR/$APP_SUBDIR/app.json"
-          VERSION=$(node -e "console.log(require('./$APP_JSON').expo.version)")
-          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-          VERSIONED="flashlight-strobe-v${VERSION}-${TIMESTAMP}.apk"
-          LATEST="flashlight-strobe-latest.apk"
-
-          upload() {
-            HTTP=$(curl -fsSL -o /dev/null -w "%{http_code}" \
-              -X POST \
-              "${SUPABASE_URL}/storage/v1/object/${SUPABASE_BUCKET}/$1?upsert=true" \
-              -H "Authorization: Bearer ${SUPABASE_KEY}" \
-              -H "Content-Type: application/octet-stream" \
-              -H "x-upsert: true" \
-              --data-binary @"${APK}")
-            echo "$1 -> HTTP $HTTP"
-            [ "$HTTP" -ge 200 ] && [ "$HTTP" -lt 300 ] || exit 1
-          }
-
-          upload "$VERSIONED"
-          upload "$LATEST"
-
-          echo "Done: ${SUPABASE_URL}/storage/v1/object/public/${SUPABASE_BUCKET}/${LATEST}"
+          APP_DIR=$(find . -maxdepth 6 -name "app.json" -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
+          cd "$APP_DIR/android"
+          chmod +x ./gradlew
+          ./gradlew assembleRelease --no-daemon
 
     artifacts:
       - "**/app/build/outputs/apk/**/*.apk"
+
+    publishing:
+      scripts:
+        - name: Upload APK to Supabase
+          script: |
+            set -e
+
+            if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_KEY" ] || [ -z "$SUPABASE_BUCKET" ]; then
+              echo "Supabase vars not set — skipping upload."
+              exit 0
+            fi
+
+            # Find the APK — searches all subdirs under outputs/apk/ (e.g. release/, debug/)
+            APK=$(find . -name "*.apk" -path "*/app/build/outputs/apk/*" 2>/dev/null | head -1)
+            if [ -z "$APK" ]; then
+              echo "No APK found under */app/build/outputs/apk/*"
+              echo "Searching broadly for any .apk..."
+              APK=$(find . -name "*.apk" 2>/dev/null | grep -v node_modules | head -1)
+            fi
+            if [ -z "$APK" ]; then
+              echo "No APK found anywhere — build may have failed silently."
+              exit 1
+            fi
+            echo "Found APK: $APK"
+
+            APP_JSON=$(find . -maxdepth 8 -name "app.json" -exec grep -l '"expo"' {} \; 2>/dev/null | head -1)
+            VERSION=$(node -e "console.log(require('./$APP_JSON').expo.version)")
+            TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+            VERSIONED="flashlight-strobe-v${VERSION}-${TIMESTAMP}.apk"
+            LATEST="flashlight-strobe-latest.apk"
+
+            upload() {
+              HTTP=$(curl -fsSL -o /dev/null -w "%{http_code}" \
+                -X POST \
+                "${SUPABASE_URL}/storage/v1/object/${SUPABASE_BUCKET}/$1?upsert=true" \
+                -H "Authorization: Bearer ${SUPABASE_KEY}" \
+                -H "Content-Type: application/octet-stream" \
+                -H "x-upsert: true" \
+                --data-binary @"${APK}")
+              echo "$1 -> HTTP $HTTP"
+              [ "$HTTP" -ge 200 ] && [ "$HTTP" -lt 300 ] || exit 1
+            }
+
+            upload "$VERSIONED"
+            upload "$LATEST"
+
+            echo "Done: ${SUPABASE_URL}/storage/v1/object/public/${SUPABASE_BUCKET}/${LATEST}"
+            echo "Update remote config: latestApkVersion=${VERSION}"
