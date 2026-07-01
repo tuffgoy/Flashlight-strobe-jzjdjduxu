@@ -167,37 +167,25 @@ workflows:
             -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
           APP_ABS=$(cd "$APP_DIR" && pwd)
 
-          WORKSPACE_YAML=$(find . -maxdepth 5 -name "pnpm-workspace.yaml" 2>/dev/null | head -1)
-          WORKSPACE_ABS=$(cd "$(dirname "$WORKSPACE_YAML")" && pwd)
+          # Gradle's createBundleReleaseJsAndAssets spawns a bare `node` process
+          # that cannot find babel-preset-expo because it runs outside of pnpm's
+          # module resolution context. Fix: pre-bundle the JS ourselves via pnpm
+          # exec (which has the full resolution context), then tell Gradle to skip
+          # the bundle task since it is already done.
+          echo "=== Pre-bundling JS via pnpm exec expo export:embed ==="
+          mkdir -p "$APP_ABS/android/app/src/main/assets"
+          cd "$APP_ABS"
+          NODE_ENV=production pnpm exec expo export:embed \
+            --platform android \
+            --entry-file node_modules/expo-router/entry.js \
+            --bundle-output android/app/src/main/assets/index.android.bundle \
+            --assets-dest android/app/src/main/res \
+            --dev false
 
-          # pnpm hoists packages to the workspace root. Metro only looks in the
-          # app's own node_modules by default, so it cannot resolve those hoisted
-          # packages and createBundleReleaseJsAndAssets exits with code 1.
-          # Writing a metro.config.js that adds watchFolders + nodeModulesPaths
-          # pointing at the workspace root fixes this without touching the repo.
-          cat > "$APP_ABS/metro.config.js" << 'METRO'
-          const { getDefaultConfig } = require('expo/metro-config');
-          const path = require('path');
-          const projectRoot = __dirname;
-          METRO
-          echo "const workspaceRoot = '${WORKSPACE_ABS}';" >> "$APP_ABS/metro.config.js"
-          cat >> "$APP_ABS/metro.config.js" << 'METRO'
-          const config = getDefaultConfig(projectRoot);
-          config.watchFolders = [workspaceRoot];
-          config.resolver.nodeModulesPaths = [
-            path.resolve(projectRoot, 'node_modules'),
-            path.resolve(workspaceRoot, 'node_modules'),
-          ];
-          config.resolver.unstable_enableSymlinks = true;
-          module.exports = config;
-          METRO
-
-          echo "--- metro.config.js ---"
-          cat "$APP_ABS/metro.config.js"
-
+          echo "=== Bundle complete, running Gradle (skipping bundle task) ==="
           cd "$APP_ABS/android"
           chmod +x ./gradlew
-          ./gradlew assembleRelease --no-daemon
+          ./gradlew assembleRelease -x createBundleReleaseJsAndAssets --no-daemon
 
     artifacts:
       - "**/app/build/outputs/apk/**/*.apk"
