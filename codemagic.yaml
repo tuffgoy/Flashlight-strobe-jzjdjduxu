@@ -172,10 +172,10 @@ workflows:
           # module resolution context. Fix: pre-bundle the JS ourselves via pnpm
           # exec (which has the full resolution context), then tell Gradle to skip
           # the bundle task since it is already done.
-          echo "=== Pre-bundling JS via pnpm exec expo export:embed ==="
+          echo "=== Pre-bundling JS via expo export:embed ==="
           mkdir -p "$APP_ABS/android/app/src/main/assets"
           cd "$APP_ABS"
-          NODE_ENV=production pnpm exec expo export:embed \
+          NODE_ENV=production ./node_modules/.bin/expo export:embed \
             --platform android \
             --entry-file node_modules/expo-router/entry.js \
             --bundle-output android/app/src/main/assets/index.android.bundle \
