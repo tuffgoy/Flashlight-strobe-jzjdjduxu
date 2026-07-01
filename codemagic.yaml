@@ -91,11 +91,17 @@ workflows:
 
           node -e "const fs=require('fs');const file='$APP_GRADLE';let src=fs.readFileSync(file,'utf8');const block='\n              release {\n                  storeFile file(MYAPP_RELEASE_STORE_FILE)\n                  storePassword MYAPP_RELEASE_STORE_PASSWORD\n                  keyAlias MYAPP_RELEASE_KEY_ALIAS\n                  keyPassword MYAPP_RELEASE_KEY_PASSWORD\n              }';if(!src.includes('MYAPP_RELEASE_STORE_FILE')){src=src.replace(/signingConfigs\s*\{/,'signingConfigs {'+block);}src=src.replace(/signingConfig signingConfigs\.debug/g,'signingConfig signingConfigs.release');fs.writeFileSync(file,src);console.log('build.gradle patched.');"
 
+          echo "=== build.gradle signing section ==="
+          grep -A 20 "signingConfigs" "$APP_GRADLE" || echo "(signingConfigs not found)"
+
       - name: Build release APK
         script: |
+          set -eo pipefail
           cd "$WORKSPACE_DIR/$APP_SUBDIR/android"
           chmod +x ./gradlew
-          ./gradlew assembleRelease --no-daemon --stacktrace 2>&1 | tail -150
+          ./gradlew assembleRelease --no-daemon 2>&1 | tee /tmp/gradle.log
+          echo "=== APK search ==="
+          find . -name "*.apk" 2>/dev/null || echo "No APKs found after build"
 
       - name: Upload APK to Supabase
         script: |
