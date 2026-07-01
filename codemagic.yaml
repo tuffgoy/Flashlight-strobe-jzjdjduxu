@@ -23,17 +23,6 @@ workflows:
           include: true
 
     scripts:
-      - name: Show repo structure
-        script: |
-          echo "=== Working directory ==="
-          pwd
-          echo "=== Root contents ==="
-          ls -la
-          echo "=== All app.json files found ==="
-          find . -maxdepth 4 -name "app.json" 2>/dev/null
-          echo "=== All pnpm-workspace.yaml files found ==="
-          find . -maxdepth 5 -name "pnpm-workspace.yaml" 2>/dev/null
-
       - name: Install pnpm
         script: |
           corepack disable || true
@@ -43,95 +32,56 @@ workflows:
       - name: Install JS dependencies
         script: |
           set -e
-          APP_DIR=$(find . -maxdepth 4 -name "app.json" \
-            -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
-          APP_ABS=$(cd "$APP_DIR" && pwd)
-          echo "Expo app found at: $APP_ABS"
 
-          WORKSPACE_YAML=$(find . -maxdepth 5 -name "pnpm-workspace.yaml" 2>/dev/null | head -1)
-          if [ -z "$WORKSPACE_YAML" ]; then
-            echo "ERROR: no pnpm-workspace.yaml found. This package.json uses"
-            echo "'catalog:' / 'workspace:*' specifiers which require one."
-            exit 1
-          fi
+          # The repo structure is: repo-root/ contains pnpm-workspace.yaml
+          # and flashlight-strobe/ is the Expo app workspace member.
+          WORKSPACE_ABS=$(pwd)
+          APP_ABS="$WORKSPACE_ABS/flashlight-strobe"
 
-          WORKSPACE_ROOT=$(dirname "$WORKSPACE_YAML")
-          WORKSPACE_ABS=$(cd "$WORKSPACE_ROOT" && pwd)
-          echo "Found pnpm workspace root at: $WORKSPACE_ABS"
-          echo "--- pnpm-workspace.yaml (before) ---"
-          cat "$WORKSPACE_YAML"
+          echo "Workspace root: $WORKSPACE_ABS"
+          echo "App dir:        $APP_ABS"
 
-          # Ask pnpm which directories it currently recognizes as workspace
-          # members. If the app folder isn't among them, its deps (including
-          # expo) are invisible to install no matter how many times we run it.
-          RECOGNIZED=$(cd "$WORKSPACE_ABS" && pnpm -r exec -- pwd 2>/dev/null || true)
-          echo "--- Workspace packages pnpm currently recognizes ---"
-          echo "$RECOGNIZED"
-
-          if ! echo "$RECOGNIZED" | grep -qF "$APP_ABS"; then
-            echo "App folder is NOT a recognized pnpm workspace member. Patching pnpm-workspace.yaml..."
-            if grep -q '^packages:' "$WORKSPACE_YAML"; then
-              awk '{print} /^packages:/ && !done {print "  - \"*\""; print "  - \"packages/*\""; print "  - \"apps/*\""; done=1}' \
-                "$WORKSPACE_YAML" > "$WORKSPACE_YAML.tmp"
-            else
-              { printf 'packages:\n  - "*"\n  - "packages/*"\n  - "apps/*"\n'; cat "$WORKSPACE_YAML"; } \
-                > "$WORKSPACE_YAML.tmp"
-            fi
-            mv "$WORKSPACE_YAML.tmp" "$WORKSPACE_YAML"
-            echo "--- pnpm-workspace.yaml (after patch) ---"
-            cat "$WORKSPACE_YAML"
-          fi
-
-          cd "$WORKSPACE_ABS"
+          # Install all workspace dependencies.
+          # --shamefully-hoist lifts packages to the root node_modules where
+          # possible, but pnpm still keeps transitive deps in .pnpm/ store.
           pnpm install --no-frozen-lockfile --shamefully-hoist
 
-          echo "=== Verifying expo was installed in the app package ==="
+          # CRITICAL: babel-preset-expo is a transitive dep that lives inside
+          # pnpm's .pnpm virtual store and is NOT directly available in either
+          # the workspace root or app node_modules via normal require() resolution.
+          # NODE_PATH tricks don't help because pnpm's isolated store means
+          # there is no flat babel-preset-expo/ symlink to point at.
+          #
+          # Fix: install it directly into the app's node_modules using npm
+          # (--no-save skips package.json modification). Metro and Babel will
+          # find it via standard upward directory traversal from the app root.
+          echo "Ensuring babel-preset-expo is resolvable from app directory..."
           cd "$APP_ABS"
-
-          if ! pnpm list expo --depth 0 2>/dev/null | grep -q expo; then
-            echo "ERROR: 'expo' still did not resolve into $APP_ABS/node_modules."
-            echo "--- Workspace packages pnpm recognizes now ---"
-            cd "$WORKSPACE_ABS" && pnpm -r exec -- pwd 2>/dev/null || true
-            exit 1
+          if ! node -e "require.resolve('babel-preset-expo')" 2>/dev/null; then
+            echo "babel-preset-expo not found — installing locally with npm..."
+            npm install --no-save babel-preset-expo
+            echo "babel-preset-expo installed successfully."
+          else
+            echo "babel-preset-expo already resolvable — skipping."
           fi
-
-          if [ ! -e "./node_modules/.bin/expo" ]; then
-            echo "ERROR: expo resolved but node_modules/.bin/expo was not created."
-            ls -la node_modules/.bin | head -50
-            exit 1
-          fi
-
-          echo "expo binary confirmed at $(pwd)/node_modules/.bin/expo"
 
       - name: Expo prebuild (generate Android project)
         script: |
           set -e
-          APP_DIR=$(find . -maxdepth 4 -name "app.json" \
-            -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
-          echo "Running prebuild in: $APP_DIR"
-
-          cd "$APP_DIR"
-
-          # Use pnpm's own resolution instead of a manual node_modules/.bin check.
-          # This never falls back to the legacy global expo-cli, which is
-          # deprecated, incompatible with Node 17+, and was masking the real
-          # "expo not installed" error in earlier build logs.
+          cd flashlight-strobe
           pnpm exec expo prebuild --platform android --clean --no-install
 
       - name: Set Android SDK path
         script: |
-          APP_DIR=$(find . -maxdepth 4 -name "app.json" \
-            -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
-          echo "sdk.dir=$ANDROID_SDK_ROOT" > "$APP_DIR/android/local.properties"
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > flashlight-strobe/android/local.properties
 
       - name: Configure release keystore
         script: |
-          APP_DIR=$(find . -maxdepth 4 -name "app.json" \
-            -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
-          ANDROID_DIR="$APP_DIR/android"
+          set -e
+          ANDROID_DIR="flashlight-strobe/android"
           APP_GRADLE="$ANDROID_DIR/app/build.gradle"
 
-          echo "Decoding keystore into $ANDROID_DIR/app/release.keystore"
+          echo "Decoding keystore..."
           echo "$CM_KEYSTORE" | base64 --decode > "$ANDROID_DIR/app/release.keystore"
 
           cat >> "$ANDROID_DIR/gradle.properties" << PROPS
@@ -163,23 +113,8 @@ workflows:
       - name: Build release APK
         script: |
           set -e
-          APP_DIR=$(find . -maxdepth 4 -name "app.json" \
-            -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
-          APP_ABS=$(cd "$APP_DIR" && pwd)
-          WORKSPACE_YAML=$(find . -maxdepth 5 -name "pnpm-workspace.yaml" 2>/dev/null | head -1)
-          WORKSPACE_ABS=$(cd "$(dirname "$WORKSPACE_YAML")" && pwd)
-          echo "App: $APP_ABS  Workspace: $WORKSPACE_ABS"
-
-          # Gradle's createBundleReleaseJsAndAssets spawns a bare node subprocess.
-          # That subprocess can't find babel-preset-expo because pnpm keeps it in
-          # the workspace root's node_modules, not the app's. NODE_PATH is the
-          # standard Node mechanism to add extra module lookup directories; child
-          # processes inherit it, so the Gradle-spawned node will find the preset.
-          export NODE_PATH="$WORKSPACE_ABS/node_modules:$APP_ABS/node_modules"
           export NODE_ENV=production
-          echo "NODE_PATH=$NODE_PATH"
-
-          cd "$APP_ABS/android"
+          cd flashlight-strobe/android
           chmod +x ./gradlew
           ./gradlew assembleRelease --no-daemon
 
@@ -201,9 +136,7 @@ workflows:
                          -path "*/app/build/outputs/apk/**/*.apk" 2>/dev/null | head -1)
             if [ -z "$APK" ]; then echo "No APK found!"; exit 1; fi
 
-            APP_JSON=$(find . -maxdepth 4 -name "app.json" \
-              -exec grep -l '"expo"' {} \; 2>/dev/null | head -1)
-            VERSION=$(node -e "console.log(require('$APP_JSON').expo.version)")
+            VERSION=$(node -e "console.log(require('./flashlight-strobe/app.json').expo.version)")
             TIMESTAMP=$(date +%Y%m%d-%H%M%S)
             VERSIONED="flashlight-strobe-v${VERSION}-${TIMESTAMP}.apk"
             LATEST="flashlight-strobe-latest.apk"
