@@ -20,8 +20,8 @@ jobs:
       # Step 1: Check if the folder exists, then zip it
       - name: Create Zip Archive
         run: |
-          if [ -d "flashlight-strobe-github" ]; then
-            zip -r flashlight-strobe-github1.zip flashlight-strobe-github
+          if [ -d "flashlight-strobe-github2" ]; then
+            zip -r flashlight-strobe-github2.zip flashlight-strobe-github
             echo "Successfully zipped folder."
           else
             echo "Error: flashlight-strobe-github folder not found!"
