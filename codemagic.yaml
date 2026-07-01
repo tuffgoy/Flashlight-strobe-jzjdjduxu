@@ -41,6 +41,146 @@ workflows:
           npm install -g pnpm@9 --force
           pnpm --version
 
+      # ── Fix A: pnpm-workspace.yaml lists "artifacts/*" but app is at "flashlight-strobe/"
+      # ── Fix B: @workspace/api-client-react does not exist in this repo
+      - name: Patch workspace config
+        script: |
+          cd "$WORKSPACE_DIR"
+
+          sed -i 's|  - artifacts/\*|  - flashlight-strobe|' pnpm-workspace.yaml
+          sed -i '/^  - lib\/\*/d' pnpm-workspace.yaml
+          sed -i '/^  - lib\/integrations\/\*/d' pnpm-workspace.yaml
+          sed -i '/^  - scripts/d' pnpm-workspace.yaml
+          echo "pnpm-workspace.yaml packages:"
+          grep -A4 "^packages:" pnpm-workspace.yaml
+
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('$APP_SUBDIR/package.json', 'utf8'));
+            delete (pkg.devDependencies || {})['@workspace/api-client-react'];
+            fs.writeFileSync('$APP_SUBDIR/package.json', JSON.stringify(pkg, null, 2) + '\n');
+            console.log('package.json: removed @workspace/api-client-react');
+          "
+
+      # ── Fix C: expo-symbols and expo-router/unstable-native-tabs are iOS-only packages.
+      #    Metro bundler fails to process them during the Android release build.
+      #    Rewrite _layout.tsx to a cross-platform version using only Feather icons.
+      #
+      # ── Fix D: tsconfig.json has a broken reference to ../../lib/api-client-react
+      #    which doesn't exist in this repo. Remove it.
+      #
+      # ── Fix E: reactCompiler:true in app.json enables an experimental Babel plugin
+      #    that can crash on complex hook patterns. Disable it for the Android build.
+      - name: Patch iOS-only source files for Android build
+        script: |
+          cd "$WORKSPACE_DIR/$APP_SUBDIR"
+
+          # Rewrite _layout.tsx — remove expo-symbols + NativeTabs (iOS-only)
+          node -e "
+            const fs = require('fs');
+            const layout = \`import React from 'react';
+import { Platform, StyleSheet, useColorScheme, View } from 'react-native';
+import { Feather } from '@expo/vector-icons';
+import { BlurView } from 'expo-blur';
+import { Tabs } from 'expo-router';
+import { useColors } from '@/hooks/useColors';
+
+export default function TabLayout() {
+  const colors = useColors();
+  const colorScheme = useColorScheme();
+  const isDark = colorScheme === 'dark';
+  const isIOS = Platform.OS === 'ios';
+  const isWeb = Platform.OS === 'web';
+
+  return (
+    <Tabs
+      screenOptions={{
+        tabBarActiveTintColor: colors.primary,
+        tabBarInactiveTintColor: colors.mutedForeground,
+        headerShown: true,
+        headerStyle: { backgroundColor: colors.background },
+        headerTitleStyle: {
+          color: colors.foreground,
+          fontFamily: 'Inter_700Bold',
+          letterSpacing: 2,
+          fontSize: 13,
+        },
+        headerTintColor: colors.foreground,
+        tabBarStyle: {
+          position: 'absolute',
+          backgroundColor: isIOS ? 'transparent' : colors.background,
+          borderTopWidth: 1,
+          borderTopColor: colors.border,
+          elevation: 0,
+          height: isWeb ? 84 : undefined,
+        },
+        tabBarLabelStyle: {
+          fontFamily: 'Inter_500Medium',
+          fontSize: 10,
+          letterSpacing: 0.5,
+        },
+        tabBarBackground: () =>
+          isIOS ? (
+            <BlurView intensity={100} tint=\"dark\" style={StyleSheet.absoluteFill} />
+          ) : isWeb ? (
+            <View style={[StyleSheet.absoluteFill, { backgroundColor: colors.background }]} />
+          ) : null,
+      }}
+    >
+      <Tabs.Screen
+        name=\"index\"
+        options={{
+          title: 'STROBE',
+          tabBarLabel: 'Strobe',
+          tabBarIcon: ({ color }) => <Feather name=\"zap\" size={20} color={color} />,
+        }}
+      />
+      <Tabs.Screen
+        name=\"patterns\"
+        options={{
+          title: 'PATTERNS',
+          tabBarLabel: 'Patterns',
+          tabBarIcon: ({ color }) => <Feather name=\"grid\" size={20} color={color} />,
+        }}
+      />
+      <Tabs.Screen
+        name=\"settings\"
+        options={{
+          title: 'SETTINGS',
+          tabBarLabel: 'Settings',
+          tabBarIcon: ({ color }) => <Feather name=\"settings\" size={20} color={color} />,
+        }}
+      />
+    </Tabs>
+  );
+}
+\`;
+            fs.writeFileSync('app/(tabs)/_layout.tsx', layout);
+            console.log('_layout.tsx: rewritten without iOS-only imports');
+          "
+
+          # Fix tsconfig.json: remove broken reference to ../../lib/api-client-react
+          node -e "
+            const fs = require('fs');
+            const ts = JSON.parse(fs.readFileSync('tsconfig.json', 'utf8'));
+            ts.references = (ts.references || []).filter(
+              r => !r.path.includes('api-client-react')
+            );
+            fs.writeFileSync('tsconfig.json', JSON.stringify(ts, null, 2) + '\n');
+            console.log('tsconfig.json: removed broken api-client-react reference');
+          "
+
+          # Fix app.json: disable experimental React Compiler (crashes Metro on complex hooks)
+          node -e "
+            const fs = require('fs');
+            const app = JSON.parse(fs.readFileSync('app.json', 'utf8'));
+            if (app.expo && app.expo.experiments) {
+              app.expo.experiments.reactCompiler = false;
+            }
+            fs.writeFileSync('app.json', JSON.stringify(app, null, 2) + '\n');
+            console.log('app.json: reactCompiler disabled');
+          "
+
       - name: Install JS dependencies
         script: |
           cd "$WORKSPACE_DIR"
@@ -93,7 +233,7 @@ workflows:
         script: |
           cd "$WORKSPACE_DIR/$APP_SUBDIR/android"
           chmod +x ./gradlew
-          ./gradlew assembleRelease --no-daemon
+          ./gradlew assembleRelease --no-daemon --stacktrace 2>&1 | tail -100
 
     artifacts:
       - "**/app/build/outputs/apk/**/*.apk"
