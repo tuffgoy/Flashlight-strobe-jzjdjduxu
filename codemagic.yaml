@@ -52,127 +52,25 @@ workflows:
           echo "pnpm-workspace.yaml packages:"
           grep -A4 "^packages:" pnpm-workspace.yaml
 
-          node -e "
-            const fs = require('fs');
-            const pkg = JSON.parse(fs.readFileSync('$APP_SUBDIR/package.json', 'utf8'));
-            delete (pkg.devDependencies || {})['@workspace/api-client-react'];
-            fs.writeFileSync('$APP_SUBDIR/package.json', JSON.stringify(pkg, null, 2) + '\n');
-            console.log('package.json: removed @workspace/api-client-react');
-          "
+          node -e "const fs=require('fs');const pkg=JSON.parse(fs.readFileSync('$APP_SUBDIR/package.json','utf8'));delete (pkg.devDependencies||{})['@workspace/api-client-react'];fs.writeFileSync('$APP_SUBDIR/package.json',JSON.stringify(pkg,null,2)+'\n');console.log('removed @workspace/api-client-react');"
 
       - name: Patch iOS-only source files for Android build
         script: |
           cd "$WORKSPACE_DIR/$APP_SUBDIR"
 
-          # Write Android-safe _layout.tsx using heredoc (avoids YAML parsing issues)
-          cat > "app/(tabs)/_layout.tsx" << 'EOFILE'
-import React from 'react';
-import { Platform, StyleSheet, useColorScheme, View } from 'react-native';
-import { Feather } from '@expo/vector-icons';
-import { BlurView } from 'expo-blur';
-import { Tabs } from 'expo-router';
-import { useColors } from '@/hooks/useColors';
-
-export default function TabLayout() {
-  const colors = useColors();
-  const colorScheme = useColorScheme();
-  const isDark = colorScheme === 'dark';
-  const isIOS = Platform.OS === 'ios';
-  const isWeb = Platform.OS === 'web';
-
-  return (
-    <Tabs
-      screenOptions={{
-        tabBarActiveTintColor: colors.primary,
-        tabBarInactiveTintColor: colors.mutedForeground,
-        headerShown: true,
-        headerStyle: { backgroundColor: colors.background },
-        headerTitleStyle: {
-          color: colors.foreground,
-          fontFamily: 'Inter_700Bold',
-          letterSpacing: 2,
-          fontSize: 13,
-        },
-        headerTintColor: colors.foreground,
-        tabBarStyle: {
-          position: 'absolute',
-          backgroundColor: isIOS ? 'transparent' : colors.background,
-          borderTopWidth: 1,
-          borderTopColor: colors.border,
-          elevation: 0,
-          height: isWeb ? 84 : undefined,
-        },
-        tabBarLabelStyle: {
-          fontFamily: 'Inter_500Medium',
-          fontSize: 10,
-          letterSpacing: 0.5,
-        },
-        tabBarBackground: () =>
-          isIOS ? (
-            <BlurView intensity={100} tint="dark" style={StyleSheet.absoluteFill} />
-          ) : isWeb ? (
-            <View style={[StyleSheet.absoluteFill, { backgroundColor: colors.background }]} />
-          ) : null,
-      }}
-    >
-      <Tabs.Screen
-        name="index"
-        options={{
-          title: 'STROBE',
-          tabBarLabel: 'Strobe',
-          tabBarIcon: ({ color }) => <Feather name="zap" size={20} color={color} />,
-        }}
-      />
-      <Tabs.Screen
-        name="patterns"
-        options={{
-          title: 'PATTERNS',
-          tabBarLabel: 'Patterns',
-          tabBarIcon: ({ color }) => <Feather name="grid" size={20} color={color} />,
-        }}
-      />
-      <Tabs.Screen
-        name="settings"
-        options={{
-          title: 'SETTINGS',
-          tabBarLabel: 'Settings',
-          tabBarIcon: ({ color }) => <Feather name="settings" size={20} color={color} />,
-        }}
-      />
-    </Tabs>
-  );
-}
-EOFILE
+          echo aW1wb3J0IFJlYWN0IGZyb20gJ3JlYWN0JzsKaW1wb3J0IHsgUGxhdGZvcm0sIFN0eWxlU2hlZXQsIHVzZUNvbG9yU2NoZW1lLCBWaWV3IH0gZnJvbSAncmVhY3QtbmF0aXZlJzsKaW1wb3J0IHsgRmVhdGhlciB9IGZyb20gJ0BleHBvL3ZlY3Rvci1pY29ucyc7CmltcG9ydCB7IEJsdXJWaWV3IH0gZnJvbSAnZXhwby1ibHVyJzsKaW1wb3J0IHsgVGFicyB9IGZyb20gJ2V4cG8tcm91dGVyJzsKaW1wb3J0IHsgdXNlQ29sb3JzIH0gZnJvbSAnQC9ob29rcy91c2VDb2xvcnMnOwoKZXhwb3J0IGRlZmF1bHQgZnVuY3Rpb24gVGFiTGF5b3V0KCkgewogIGNvbnN0IGNvbG9ycyA9IHVzZUNvbG9ycygpOwogIGNvbnN0IGNvbG9yU2NoZW1lID0gdXNlQ29sb3JTY2hlbWUoKTsKICBjb25zdCBpc0RhcmsgPSBjb2xvclNjaGVtZSA9PT0gJ2RhcmsnOwogIGNvbnN0IGlzSU9TID0gUGxhdGZvcm0uT1MgPT09ICdpb3MnOwogIGNvbnN0IGlzV2ViID0gUGxhdGZvcm0uT1MgPT09ICd3ZWInOwoKICByZXR1cm4gKAogICAgPFRhYnMKICAgICAgc2NyZWVuT3B0aW9ucz17ewogICAgICAgIHRhYkJhckFjdGl2ZVRpbnRDb2xvcjogY29sb3JzLnByaW1hcnksCiAgICAgICAgdGFiQmFySW5hY3RpdmVUaW50Q29sb3I6IGNvbG9ycy5tdXRlZEZvcmVncm91bmQsCiAgICAgICAgaGVhZGVyU2hvd246IHRydWUsCiAgICAgICAgaGVhZGVyU3R5bGU6IHsgYmFja2dyb3VuZENvbG9yOiBjb2xvcnMuYmFja2dyb3VuZCB9LAogICAgICAgIGhlYWRlclRpdGxlU3R5bGU6IHsKICAgICAgICAgIGNvbG9yOiBjb2xvcnMuZm9yZWdyb3VuZCwKICAgICAgICAgIGZvbnRGYW1pbHk6ICdJbnRlcl83MDBCb2xkJywKICAgICAgICAgIGxldHRlclNwYWNpbmc6IDIsCiAgICAgICAgICBmb250U2l6ZTogMTMsCiAgICAgICAgfSwKICAgICAgICBoZWFkZXJUaW50Q29sb3I6IGNvbG9ycy5mb3JlZ3JvdW5kLAogICAgICAgIHRhYkJhclN0eWxlOiB7CiAgICAgICAgICBwb3NpdGlvbjogJ2Fic29sdXRlJywKICAgICAgICAgIGJhY2tncm91bmRDb2xvcjogaXNJT1MgPyAndHJhbnNwYXJlbnQnIDogY29sb3JzLmJhY2tncm91bmQsCiAgICAgICAgICBib3JkZXJUb3BXaWR0aDogMSwKICAgICAgICAgIGJvcmRlclRvcENvbG9yOiBjb2xvcnMuYm9yZGVyLAogICAgICAgICAgZWxldmF0aW9uOiAwLAogICAgICAgICAgaGVpZ2h0OiBpc1dlYiA/IDg0IDogdW5kZWZpbmVkLAogICAgICAgIH0sCiAgICAgICAgdGFiQmFyTGFiZWxTdHlsZTogewogICAgICAgICAgZm9udEZhbWlseTogJ0ludGVyXzUwME1lZGl1bScsCiAgICAgICAgICBmb250U2l6ZTogMTAsCiAgICAgICAgICBsZXR0ZXJTcGFjaW5nOiAwLjUsCiAgICAgICAgfSwKICAgICAgICB0YWJCYXJCYWNrZ3JvdW5kOiAoKSA9PgogICAgICAgICAgaXNJT1MgPyAoCiAgICAgICAgICAgIDxCbHVyVmlldyBpbnRlbnNpdHk9ezEwMH0gdGludD0iZGFyayIgc3R5bGU9e1N0eWxlU2hlZXQuYWJzb2x1dGVGaWxsfSAvPgogICAgICAgICAgKSA6IGlzV2ViID8gKAogICAgICAgICAgICA8VmlldyBzdHlsZT17W1N0eWxlU2hlZXQuYWJzb2x1dGVGaWxsLCB7IGJhY2tncm91bmRDb2xvcjogY29sb3JzLmJhY2tncm91bmQgfV19IC8+CiAgICAgICAgICApIDogbnVsbCwKICAgICAgfX0KICAgID4KICAgICAgPFRhYnMuU2NyZWVuCiAgICAgICAgbmFtZT0iaW5kZXgiCiAgICAgICAgb3B0aW9ucz17ewogICAgICAgICAgdGl0bGU6ICdTVFJPQkUnLAogICAgICAgICAgdGFiQmFyTGFiZWw6ICdTdHJvYmUnLAogICAgICAgICAgdGFiQmFySWNvbjogKHsgY29sb3IgfSkgPT4gPEZlYXRoZXIgbmFtZT0iemFwIiBzaXplPXsyMH0gY29sb3I9e2NvbG9yfSAvPiwKICAgICAgICB9fQogICAgICAvPgogICAgICA8VGFicy5TY3JlZW4KICAgICAgICBuYW1lPSJwYXR0ZXJucyIKICAgICAgICBvcHRpb25zPXt7CiAgICAgICAgICB0aXRsZTogJ1BBVFRFUk5TJywKICAgICAgICAgIHRhYkJhckxhYmVsOiAnUGF0dGVybnMnLAogICAgICAgICAgdGFiQmFySWNvbjogKHsgY29sb3IgfSkgPT4gPEZlYXRoZXIgbmFtZT0iZ3JpZCIgc2l6ZT17MjB9IGNvbG9yPXtjb2xvcn0gLz4sCiAgICAgICAgfX0KICAgICAgLz4KICAgICAgPFRhYnMuU2NyZWVuCiAgICAgICAgbmFtZT0ic2V0dGluZ3MiCiAgICAgICAgb3B0aW9ucz17ewogICAgICAgICAgdGl0bGU6ICdTRVRUSU5HUycsCiAgICAgICAgICB0YWJCYXJMYWJlbDogJ1NldHRpbmdzJywKICAgICAgICAgIHRhYkJhckljb246ICh7IGNvbG9yIH0pID0+IDxGZWF0aGVyIG5hbWU9InNldHRpbmdzIiBzaXplPXsyMH0gY29sb3I9e2NvbG9yfSAvPiwKICAgICAgICB9fQogICAgICAvPgogICAgPC9UYWJzPgogICk7Cn0K | base64 -d > "app/(tabs)/_layout.tsx"
           echo "_layout.tsx: rewritten without iOS-only imports"
 
-          # Remove broken tsconfig reference to api-client-react
-          node -e "
-            const fs = require('fs');
-            const ts = JSON.parse(fs.readFileSync('tsconfig.json', 'utf8'));
-            ts.references = (ts.references || []).filter(function(r) {
-              return r.path.indexOf('api-client-react') === -1;
-            });
-            fs.writeFileSync('tsconfig.json', JSON.stringify(ts, null, 2) + '\n');
-            console.log('tsconfig.json: removed broken api-client-react reference');
-          "
+          node -e "const fs=require('fs');const ts=JSON.parse(fs.readFileSync('tsconfig.json','utf8'));ts.references=(ts.references||[]).filter(function(r){return r.path.indexOf('api-client-react')===-1;});fs.writeFileSync('tsconfig.json',JSON.stringify(ts,null,2)+'\n');console.log('tsconfig.json: removed broken api-client-react reference');"
 
-          # Disable experimental React Compiler (can crash Metro on complex hooks)
-          node -e "
-            const fs = require('fs');
-            const app = JSON.parse(fs.readFileSync('app.json', 'utf8'));
-            if (app.expo && app.expo.experiments) {
-              app.expo.experiments.reactCompiler = false;
-            }
-            fs.writeFileSync('app.json', JSON.stringify(app, null, 2) + '\n');
-            console.log('app.json: reactCompiler disabled');
-          "
+          node -e "const fs=require('fs');const app=JSON.parse(fs.readFileSync('app.json','utf8'));if(app.expo&&app.expo.experiments){app.expo.experiments.reactCompiler=false;}fs.writeFileSync('app.json',JSON.stringify(app,null,2)+'\n');console.log('app.json: reactCompiler disabled');"
 
       - name: Install JS dependencies
         script: |
           cd "$WORKSPACE_DIR"
           pnpm install --no-frozen-lockfile
 
-      - name: Expo prebuild — generate Android native project
+      - name: Expo prebuild - generate Android native project
         script: |
           cd "$WORKSPACE_DIR/$APP_SUBDIR"
           pnpm exec expo prebuild --platform android --clean --no-install
@@ -189,25 +87,9 @@ EOFILE
           echo "Decoding keystore..."
           echo "$CM_KEYSTORE" | base64 --decode > "$ANDROID_DIR/app/release.keystore"
 
-          cat >> "$ANDROID_DIR/gradle.properties" << PROPS
-          MYAPP_RELEASE_STORE_FILE=release.keystore
-          MYAPP_RELEASE_KEY_ALIAS=${CM_KEY_ALIAS}
-          MYAPP_RELEASE_STORE_PASSWORD=${CM_KEYSTORE_PASSWORD}
-          MYAPP_RELEASE_KEY_PASSWORD=${CM_KEY_PASSWORD}
-          PROPS
+          printf '\nMYAPP_RELEASE_STORE_FILE=release.keystore\nMYAPP_RELEASE_KEY_ALIAS=%s\nMYAPP_RELEASE_STORE_PASSWORD=%s\nMYAPP_RELEASE_KEY_PASSWORD=%s\n' "$CM_KEY_ALIAS" "$CM_KEYSTORE_PASSWORD" "$CM_KEY_PASSWORD" >> "$ANDROID_DIR/gradle.properties"
 
-          node -e "
-            const fs = require('fs');
-            const file = '$APP_GRADLE';
-            let src = fs.readFileSync(file, 'utf8');
-            const block = '\n              release {\n                  storeFile file(MYAPP_RELEASE_STORE_FILE)\n                  storePassword MYAPP_RELEASE_STORE_PASSWORD\n                  keyAlias MYAPP_RELEASE_KEY_ALIAS\n                  keyPassword MYAPP_RELEASE_KEY_PASSWORD\n              }';
-            if (!src.includes('MYAPP_RELEASE_STORE_FILE')) {
-              src = src.replace(/signingConfigs\s*\{/, 'signingConfigs {' + block);
-            }
-            src = src.replace(/signingConfig signingConfigs\.debug/g, 'signingConfig signingConfigs.release');
-            fs.writeFileSync(file, src);
-            console.log('build.gradle patched.');
-          "
+          node -e "const fs=require('fs');const file='$APP_GRADLE';let src=fs.readFileSync(file,'utf8');const block='\n              release {\n                  storeFile file(MYAPP_RELEASE_STORE_FILE)\n                  storePassword MYAPP_RELEASE_STORE_PASSWORD\n                  keyAlias MYAPP_RELEASE_KEY_ALIAS\n                  keyPassword MYAPP_RELEASE_KEY_PASSWORD\n              }';if(!src.includes('MYAPP_RELEASE_STORE_FILE')){src=src.replace(/signingConfigs\s*\{/,'signingConfigs {'+block);}src=src.replace(/signingConfig signingConfigs\.debug/g,'signingConfig signingConfigs.release');fs.writeFileSync(file,src);console.log('build.gradle patched.');"
 
       - name: Build release APK
         script: |
@@ -225,7 +107,7 @@ EOFILE
             set -e
 
             if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_KEY" ] || [ -z "$SUPABASE_BUCKET" ]; then
-              echo "Supabase vars not set — skipping upload."
+              echo "Supabase vars not set -- skipping upload."
               exit 0
             fi
 
@@ -254,4 +136,3 @@ EOFILE
             upload "$LATEST"
 
             echo "Done: ${SUPABASE_URL}/storage/v1/object/public/${SUPABASE_BUCKET}/${LATEST}"
-            echo "Update remote config: latestApkVersion=${VERSION}"
