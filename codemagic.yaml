@@ -166,21 +166,25 @@ workflows:
           APP_DIR=$(find . -maxdepth 4 -name "app.json" \
             -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
           APP_ABS=$(cd "$APP_DIR" && pwd)
+          WORKSPACE_ABS=$(cd "$APP_DIR/../.." && pwd 2>/dev/null || cd "$APP_DIR/.." && pwd)
+          WORKSPACE_YAML=$(find . -maxdepth 5 -name "pnpm-workspace.yaml" 2>/dev/null | head -1)
+          if [ -n "$WORKSPACE_YAML" ]; then
+            WORKSPACE_ABS=$(cd "$(dirname "$WORKSPACE_YAML")" && pwd)
+          fi
+          echo "App: $APP_ABS  Workspace: $WORKSPACE_ABS"
 
           # Gradle's createBundleReleaseJsAndAssets spawns a bare `node` process
           # that cannot find babel-preset-expo because it runs outside of pnpm's
-          # module resolution context. Fix: pre-bundle the JS ourselves via pnpm
-          # exec (which has the full resolution context), then tell Gradle to skip
-          # the bundle task since it is already done.
+          # module resolution context. Fix: pre-bundle the JS ourselves, then tell
+          # Gradle to skip the bundle task since it is already done.
           echo "=== Pre-bundling JS via expo export:embed ==="
           mkdir -p "$APP_ABS/android/app/src/main/assets"
-          EXPO_BIN=$(find "$WORKSPACE_ABS/node_modules/.bin" "$APP_ABS/node_modules/.bin" \
+          EXPO_BIN=$(find "$APP_ABS/node_modules/.bin" "$WORKSPACE_ABS/node_modules/.bin" \
             -name "expo" -type f 2>/dev/null | head -1)
           echo "Using expo binary: $EXPO_BIN"
           cd "$APP_ABS"
-          NODE_ENV=production "$EXPO_BIN" export:embed \
+          EXPO_PROJECT_ROOT="$APP_ABS" NODE_ENV=production "$EXPO_BIN" export:embed \
             --platform android \
-            --project-root "$APP_ABS" \
             --entry-file node_modules/expo-router/entry.js \
             --bundle-output android/app/src/main/assets/index.android.bundle \
             --assets-dest android/app/src/main/res \
