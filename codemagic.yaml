@@ -40,33 +40,45 @@ workflows:
 
       - name: Install JS dependencies
         script: |
+          set -e
           APP_DIR=$(find . -maxdepth 4 -name "app.json" \
             -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
           echo "Expo app found at: $APP_DIR"
-          
-          # Force navigate into the actual app directory
+
           cd "$APP_DIR"
           pnpm install --no-frozen-lockfile
 
+          echo "=== Verifying expo was installed ==="
+          if ! pnpm list expo --depth 0 2>/dev/null | grep -q expo; then
+            echo "ERROR: 'expo' is not listed in this project's dependencies (or failed to install)."
+            echo "--- package.json dependencies ---"
+            cat package.json
+            exit 1
+          fi
+
+          if [ ! -e "./node_modules/.bin/expo" ]; then
+            echo "ERROR: expo is a declared dependency but node_modules/.bin/expo was not created."
+            echo "--- node_modules/.bin contents ---"
+            ls -la node_modules/.bin | head -50
+            exit 1
+          fi
+
+          echo "expo binary confirmed at $(pwd)/node_modules/.bin/expo"
+
       - name: Expo prebuild (generate Android project)
         script: |
+          set -e
           APP_DIR=$(find . -maxdepth 4 -name "app.json" \
             -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
           echo "Running prebuild in: $APP_DIR"
-          
+
           cd "$APP_DIR"
-          
-          # Explicitly add the local node_modules bin to the PATH so npx can find expo
-          export PATH="$PWD/node_modules/.bin:$PATH"
-          
-          # Run prebuild using the explicit local binary package
-          if [ -f "./node_modules/.bin/expo" ]; then
-            ./node_modules/.bin/expo prebuild --platform android --clean --no-install
-          else
-            # If it still isn't found, force-install expo globally just for the CLI runner
-            npm install -g expo-cli
-            npx expo prebuild --platform android --clean --no-install
-          fi
+
+          # Use pnpm's own resolution instead of a manual node_modules/.bin check.
+          # This never falls back to the legacy global expo-cli, which is
+          # deprecated, incompatible with Node 17+, and was masking the real
+          # "expo not installed" error in earlier build logs.
+          pnpm exec expo prebuild --platform android --clean --no-install
 
       - name: Set Android SDK path
         script: |
