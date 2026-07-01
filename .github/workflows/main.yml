@@ -1,0 +1,30 @@
+name: Auto-Zip Flashlight Folder
+
+on:
+  push:
+    branches:
+      - main # Change to your default branch if needed
+    paths:
+      - 'flashlight-strobe-github/**' # Trigger only when files in this folder change
+  workflow_dispatch: # Allows manual triggering if needed
+
+jobs:
+  zip-project:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step 1: Check out the repository content
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Step 2: Zip the existing folder
+      - name: Create Zip Archive
+        run: |
+          zip -r flashlight-strobe-github flashlight-strobe-github1.zip
+
+      # Step 3: Upload the zip file as an artifact
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: flashlight-strobe-zip
+          path: flashlight-strobe-github1.zip
