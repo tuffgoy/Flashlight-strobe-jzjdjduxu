@@ -44,7 +44,7 @@ workflows:
         script: |
           set -e
           
-          # 1. Locate the workspace parent directory dynamically
+          # 1. Find the workspace root
           WORKSPACE_DIR=$(find . -maxdepth 4 -name "pnpm-workspace.yaml" 2>/dev/null | head -1 | xargs dirname)
           if [ -z "$WORKSPACE_DIR" ] || [ "$WORKSPACE_DIR" = "." ]; then
             WORKSPACE_ABS=$(pwd)
@@ -53,11 +53,12 @@ workflows:
           fi
           echo "Workspace root found at: $WORKSPACE_ABS"
 
-          # 2. Patch configs safely for headless Android compilation environment
+          # 2. Find the application folder
           APP_DIR=$(find . -maxdepth 4 -name "app.json" -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
           APP_ABS=$(cd "$APP_DIR" && pwd)
           echo "Expo app package found at: $APP_ABS"
 
+          # 3. Patch configuration files safely
           cd "$APP_ABS"
           if [ -f "pnpm-workspace.yaml" ]; then
             sed -i 's|  - artifacts/\*|  - flashlight-strobe|' pnpm-workspace.yaml
@@ -75,15 +76,15 @@ workflows:
             }
           "
 
-          # 3. Clean native pnpm install (No standard npm mixed protocols)
+          # 4. Clean workspace installation (no vanilla npm interventions)
           cd "$WORKSPACE_ABS"
           pnpm install --no-frozen-lockfile --shamefully-hoist
 
-            - name: Build release APK
+      - name: Build release APK
         script: |
           set -e
           
-          # Find the app and workspace directories
+          # Find the app and workspace directories again for isolation
           WORKSPACE_DIR=$(find . -maxdepth 4 -name "pnpm-workspace.yaml" 2>/dev/null | head -1 | xargs dirname)
           if [ -z "$WORKSPACE_DIR" ] || [ "$WORKSPACE_DIR" = "." ]; then WORKSPACE_ABS=$(pwd); else WORKSPACE_ABS=$(cd "$WORKSPACE_DIR" && pwd); fi
           
@@ -93,11 +94,15 @@ workflows:
           echo "=== Pre-bundling JS via isolated expo export:embed ==="
           mkdir -p "$APP_ABS/android/app/src/main/assets"
           
-          # Locate the absolute path of the local expo bin
+          # Locate absolute binary path inside workspace now that installation completes first
           EXPO_BIN=$(find "$WORKSPACE_ABS/node_modules/.bin" "$APP_ABS/node_modules/.bin" -name "expo" -type f 2>/dev/null | head -1)
+          if [ -z "$EXPO_BIN" ]; then
+            echo "Error: Cannot find binary execution path for expo. Checking local node modules fallback..."
+            EXPO_BIN="$APP_ABS/node_modules/expo/bin/cli.js"
+          fi
           echo "Using expo binary path: $EXPO_BIN"
           
-          # Execute bundler directly inside the target application directory
+          # Bundle from app target root directory 
           cd "$APP_ABS"
           NODE_ENV=production "$EXPO_BIN" export:embed \
             --platform android \
@@ -112,7 +117,6 @@ workflows:
           chmod +x ./gradlew
           ./gradlew assembleRelease -x createBundleReleaseJsAndAssets --no-daemon
 
-
       - name: Upload APK to Supabase
         script: |
           set -e
@@ -121,6 +125,7 @@ workflows:
             exit 0
           fi
 
+          # Safe runtime traversal scan to catch compiled APK binaries anywhere in output build paths
           APK=$(find . -path "*/app/build/outputs/apk/*.apk" -o -path "*/app/build/outputs/apk/**/*.apk" 2>/dev/null | head -1)
           if [ -z "$APK" ]; then echo "Build failure: No compiled APK artifact detected."; exit 1; fi
 
