@@ -4,6 +4,8 @@ workflows:
     max_build_duration: 60
     instance_type: mac_mini_m1
     environment:
+      java: 17
+      node: 20.17.0
       groups:
         - CM        # CM_KEYSTORE, CM_KEY_ALIAS, CM_KEYSTORE_PASSWORD, CM_KEY_PASSWORD
         - SUPABASE  # SUPABASE_URL, SUPABASE_KEY, SUPABASE_BUCKET
@@ -35,9 +37,10 @@ workflows:
       - name: Expo prebuild
         script: |
           REPO_ROOT=$(pwd)
-          cd "$REPO_ROOT/flashlight-strobe-github"
-          # pnpm run sets up .bin PATH correctly for the package — more reliable than npx/exec
-          pnpm --filter @workspace/flashlight-strobe run prebuild:android
+          # cd INTO the app dir — pnpm exec resolves binaries correctly when run
+          # from inside a workspace package directory (traverses up to workspace root .bin)
+          cd "$REPO_ROOT/flashlight-strobe-github/flashlight-strobe"
+          pnpm exec expo prebuild --platform android --clean --no-install
 
       - name: Restore pnpm-aware metro.config.js (belt-and-suspenders)
         # expo prebuild may overwrite metro.config.js. Decode the committed
