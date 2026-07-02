@@ -23,116 +23,135 @@ workflows:
           include: true
 
     scripts:
-      - name: Show repo structure
-        script: |
-          echo "=== Hardcoded Directory Layout Sanity Check ==="
-          pwd
-          ls -la
-          echo "=== Checking App Subfolder ==="
-          if [ -d "flashlight-strobe" ]; then
-            ls -la flashlight-strobe
-          else
-            echo "ERROR: flashlight-strobe folder not found in current directory"
-          fi
-
+      # ── 1. pnpm ────────────────────────────────────────────────────────────
       - name: Install pnpm
         script: |
           corepack disable || true
-          npm install -g pnpm@latest --force
+          npm install -g pnpm@9 --force
           pnpm --version
 
+      # ── 2. JS dependencies ─────────────────────────────────────────────────
+      #
+      # IMPORTANT: The repo root has a separate package.json that is NOT the
+      # Expo project. The actual pnpm workspace lives in flashlight-strobe-github/.
+      # We must cd there before running any pnpm commands.
       - name: Install JS dependencies
         script: |
           set -e
-          
-          # Run directly from the workspace root folder where pnpm-workspace.yaml is
-          echo "=== Patching workspace configuration ==="
-          if [ -f "pnpm-workspace.yaml" ]; then
-            sed -i 's|  - artifacts/\*|  - flashlight-strobe|' pnpm-workspace.yaml
-            sed -i '/^  - lib\/\*/d' pnpm-workspace.yaml
-            sed -i '/^  - lib\/integrations\/\*/d' pnpm-workspace.yaml
-            sed -i '/^  - scripts/d' pnpm-workspace.yaml
-          fi
 
-          echo "=== Removing incompatible private workspaces ==="
-          node -e "
-            const fs = require('fs');
-            if (fs.existsSync('package.json')) {
-              const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-              if (pkg.devDependencies) delete pkg.devDependencies['@workspace/api-client-react'];
-              fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
-            }
-          "
+          # The pnpm workspace root — this is where pnpm-workspace.yaml lives.
+          cd flashlight-strobe-github
 
-          # Clean workspace install at the root level using the correct manager context
-          echo "=== Running pnpm install ==="
+          # Install everything in the workspace (flashlight-strobe member + root deps).
+          # --shamefully-hoist puts all packages flat in node_modules so tools
+          # that do upward require() resolution can find them.
           pnpm install --no-frozen-lockfile --shamefully-hoist
 
+          # ── babel-preset-expo fix ──────────────────────────────────────────
+          # babel.config.js requires babel-preset-expo, but it is NOT listed
+          # in the app's package.json devDependencies. pnpm's module isolation
+          # means it lives only inside the .pnpm virtual store, unreachable by
+          # Babel when Metro's jest-worker spawns node subprocesses during
+          # createBundleReleaseJsAndAssets.
+          #
+          # Solution: install it directly into the app's own node_modules using
+          # plain npm (--no-save = no package.json modification). npm creates
+          # flashlight-strobe/node_modules/babel-preset-expo/, which is the
+          # first place Node's require() will look when resolving from the app.
+          echo "Installing babel-preset-expo directly into app node_modules..."
+          cd flashlight-strobe
+          npm install --no-save babel-preset-expo
+          echo "Done — $(node -e "console.log(require.resolve('babel-preset-expo'))")"
+
+      # ── 3. Generate native Android project ─────────────────────────────────
+      - name: Expo prebuild
+        script: |
+          set -e
+          cd flashlight-strobe-github/flashlight-strobe
+          pnpm exec expo prebuild --platform android --clean --no-install
+
+      # ── 4. Android SDK path ────────────────────────────────────────────────
+      - name: Set Android SDK path
+        script: |
+          echo "sdk.dir=$ANDROID_SDK_ROOT" \
+            > flashlight-strobe-github/flashlight-strobe/android/local.properties
+
+      # ── 5. Release signing ─────────────────────────────────────────────────
+      - name: Configure release keystore
+        script: |
+          set -e
+          ANDROID_DIR="flashlight-strobe-github/flashlight-strobe/android"
+
+          echo "Decoding keystore..."
+          echo "$CM_KEYSTORE" | base64 --decode > "$ANDROID_DIR/app/release.keystore"
+
+          cat >> "$ANDROID_DIR/gradle.properties" << PROPS
+          MYAPP_RELEASE_STORE_FILE=release.keystore
+          MYAPP_RELEASE_KEY_ALIAS=${CM_KEY_ALIAS}
+          MYAPP_RELEASE_STORE_PASSWORD=${CM_KEYSTORE_PASSWORD}
+          MYAPP_RELEASE_KEY_PASSWORD=${CM_KEY_PASSWORD}
+          PROPS
+
+          node -e "
+            const fs = require('fs');
+            const file = '$ANDROID_DIR/app/build.gradle';
+            let src = fs.readFileSync(file, 'utf8');
+            if (!src.includes('MYAPP_RELEASE_STORE_FILE')) {
+              src = src.replace(
+                /signingConfigs\s*\{/,
+                'signingConfigs {\n        release {\n            storeFile file(MYAPP_RELEASE_STORE_FILE)\n            storePassword MYAPP_RELEASE_STORE_PASSWORD\n            keyAlias MYAPP_RELEASE_KEY_ALIAS\n            keyPassword MYAPP_RELEASE_KEY_PASSWORD\n        }'
+              );
+            }
+            src = src.replace(/signingConfig signingConfigs\.debug/g, 'signingConfig signingConfigs.release');
+            fs.writeFileSync(file, src);
+            console.log('build.gradle patched.');
+          "
+
+      # ── 6. Build ───────────────────────────────────────────────────────────
       - name: Build release APK
         script: |
           set -e
-          
-          # Define exact workspace and app locations based on known monorepo structure
-          REPO_ROOT=$(pwd)
-          APP_ABS="$REPO_ROOT/flashlight-strobe"
-          
-          echo "=== Pre-bundling JS via isolated expo export:embed ==="
-          mkdir -p "$APP_ABS/android/app/src/main/assets"
-          
-          # Target the exact binary built into the workspace root node_modules
-          EXPO_BIN="$REPO_ROOT/node_modules/.bin/expo"
-          echo "Using verified expo binary path: $EXPO_BIN"
-          
-          # Execute the bundler cleanly from the inner app folder
-          cd "$APP_ABS"
-          NODE_ENV=production "$EXPO_BIN" export:embed \
-            --platform android \
-            --entry-file node_modules/expo-router/entry.js \
-            --bundle-output android/app/src/main/assets/index.android.bundle \
-            --assets-dest android/app/src/main/res \
-            --dev false
-
-          echo "=== Native Bundle compilation completed successfully ==="
-          echo "=== Launching Gradle distribution compilation ==="
-          
-          # Navigate directly into the explicit android folder to avoid matching plugins
-          cd "$APP_ABS/android"
+          export NODE_ENV=production
+          cd flashlight-strobe-github/flashlight-strobe/android
           chmod +x ./gradlew
-          ./gradlew assembleRelease -x createBundleReleaseJsAndAssets --no-daemon
+          ./gradlew assembleRelease --no-daemon
 
-      - name: Upload APK to Supabase
-        script: |
-          set -e
-          if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_KEY" ] || [ -z "$SUPABASE_BUCKET" ]; then
-            echo "Supabase variables missing — skipping binary sync pipeline."
-            exit 0
-          fi
+    artifacts:
+      - "**/app/build/outputs/apk/**/*.apk"
 
-          REPO_ROOT=$(pwd)
-          APP_ABS="$REPO_ROOT/flashlight-strobe"
+    publishing:
+      scripts:
+        - name: Upload APK to Supabase
+          script: |
+            set -e
 
-          # Locate built binary artifact explicitly via local output paths
-          APK=$(find "$APP_ABS/android" -path "*/app/build/outputs/apk/*.apk" -o -path "*/app/build/outputs/apk/**/*.apk" 2>/dev/null | head -1)
-          if [ -z "$APK" ]; then echo "Build failure: No compiled APK artifact detected."; exit 1; fi
+            if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_KEY" ] || [ -z "$SUPABASE_BUCKET" ]; then
+              echo "Supabase vars not set — skipping upload."
+              exit 0
+            fi
 
-          VERSION=$(node -e "console.log(require('$APP_ABS/app.json').expo.version)")
-          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-          VERSIONED="flashlight-strobe-v${VERSION}-${TIMESTAMP}.apk"
-          LATEST="flashlight-strobe-latest.apk"
-          
-          upload() {
-            HTTP=$(curl -fsSL -o /dev/null -w "%{http_code}" \
-              -X POST \
-              "${SUPABASE_URL}/storage/v1/object/${SUPABASE_BUCKET}/$1?upsert=true" \
-              -H "Authorization: Bearer ${SUPABASE_KEY}" \
-              -H "Content-Type: application/octet-stream" \
-              -H "x-upsert: true" \
-              --data-binary @"${APK}")
-            echo "Sync result for $1 -> Status code: $HTTP"
-            [ "$HTTP" -ge 200 ] && [ "$HTTP" -lt 300 ]
-          }
+            APK=$(find . -path "*/app/build/outputs/apk/**/*.apk" 2>/dev/null | head -1)
+            if [ -z "$APK" ]; then echo "No APK found!"; exit 1; fi
 
-          echo "Pushing artifacts to target bucket..."
-          upload "$VERSIONED" || exit 1
-          upload "$LATEST" || exit 1
-          echo "Deployment successful."
+            APP_JSON="flashlight-strobe-github/flashlight-strobe/app.json"
+            VERSION=$(node -e "console.log(require('./$APP_JSON').expo.version)")
+            TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+            VERSIONED="flashlight-strobe-v${VERSION}-${TIMESTAMP}.apk"
+            LATEST="flashlight-strobe-latest.apk"
+
+            upload() {
+              HTTP=$(curl -fsSL -o /dev/null -w "%{http_code}" \
+                -X POST \
+                "${SUPABASE_URL}/storage/v1/object/${SUPABASE_BUCKET}/$1?upsert=true" \
+                -H "Authorization: Bearer ${SUPABASE_KEY}" \
+                -H "Content-Type: application/octet-stream" \
+                -H "x-upsert: true" \
+                --data-binary @"${APK}")
+              echo "$1 -> HTTP $HTTP"
+              [ "$HTTP" -ge 200 ] && [ "$HTTP" -lt 300 ] || exit 1
+            }
+
+            upload "$VERSIONED"
+            upload "$LATEST"
+
+            echo "APK: ${SUPABASE_URL}/storage/v1/object/public/${SUPABASE_BUCKET}/${LATEST}"
