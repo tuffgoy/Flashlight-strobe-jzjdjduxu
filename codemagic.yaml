@@ -77,14 +77,70 @@ workflows:
           echo "Installed — $APP_NM/babel-preset-expo"
           cd "$REPO_ROOT"
 
-      # ── 3. Generate native Android project ─────────────────────────────────
+      # ── 3. Patch metro config for Hermes compatibility ─────────────────────
+      - name: Patch metro config
+        script: |
+          set -e
+          # react-native-svg v15+ (and potentially other packages) ship JavaScript
+          # source that uses ES2022 private class fields (#x, #y, #width, #height).
+          # Metro's default transformIgnorePatterns does NOT transform these packages
+          # via Babel, so the private fields survive into the bundle. hermesc then
+          # rejects them: "private properties are not supported".
+          #
+          # Fix: overwrite metro.config.js, extending transformIgnorePatterns so
+          # all listed packages are run through Babel and private fields are lowered
+          # to Hermes-compatible syntax before hermesc sees the bundle.
+          #
+          # NOTE: we use string concatenation only (no template literals, no nested
+          # quotes) so there is zero shell-escaping ambiguity in the node -e call.
+          node -e "
+            var fs = require('fs');
+            var pkgs = [
+              '(jest-)?react-native',
+              '@react-native(-community)?',
+              'expo(nent)?',
+              '@expo(nent)?/.*',
+              '@expo-google-fonts/.*',
+              'react-navigation',
+              '@react-navigation/.*',
+              '@unimodules/.*',
+              'unimodules',
+              'sentry-expo',
+              'native-base',
+              '@sentry/.*',
+              'react-native-svg',
+              'react-native-reanimated',
+              'react-native-worklets',
+              'react-native-screens',
+              'react-native-gesture-handler',
+              'react-native-safe-area-context',
+            ].join('|');
+            var pattern = 'node_modules/(?!(' + pkgs + ')/.*)';
+            var lines = [
+              \"const { getDefaultConfig } = require('expo/metro-config');\",
+              'const config = getDefaultConfig(__dirname);',
+              '// Extended transformIgnorePatterns: ensures packages with ES2022',
+              '// private class fields are transformed by Babel before hermesc.',
+              'config.transformer.transformIgnorePatterns = [',
+              \"  '\" + pattern + \"',\",
+              '];',
+              'module.exports = config;',
+            ];
+            fs.writeFileSync(
+              'flashlight-strobe-github/flashlight-strobe/metro.config.js',
+              lines.join('\n') + '\n'
+            );
+            console.log('metro.config.js patched — transformIgnorePatterns extended');
+          "
+
+      # ── 4. Generate native Android project ─────────────────────────────────
       - name: Expo prebuild
         script: |
           set -e
           cd flashlight-strobe-github/flashlight-strobe
           pnpm exec expo prebuild --platform android --clean --no-install
 
-      # ── 4. Android SDK path ────────────────────────────────────────────────
+      # ── 5. Android SDK path ────────────────────────────────────────────────
       - name: Set Android SDK path
         script: |
           echo "sdk.dir=$ANDROID_SDK_ROOT" \
