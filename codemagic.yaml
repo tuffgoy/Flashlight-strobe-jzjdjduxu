@@ -25,14 +25,15 @@ workflows:
     scripts:
       - name: Show repo structure
         script: |
-          echo "=== Working directory ==="
+          echo "=== Hardcoded Directory Layout Sanity Check ==="
           pwd
-          echo "=== Root contents ==="
           ls -la
-          echo "=== All app.json files found ==="
-          find . -maxdepth 4 -name "app.json" 2>/dev/null
-          echo "=== All pnpm-workspace.yaml files found ==="
-          find . -maxdepth 5 -name "pnpm-workspace.yaml" 2>/dev/null
+          echo "=== Checking App Subfolder ==="
+          if [ -d "flashlight-strobe" ]; then
+            ls -la flashlight-strobe
+          else
+            echo "ERROR: flashlight-strobe folder not found in current directory"
+          fi
 
       - name: Install pnpm
         script: |
@@ -44,22 +45,8 @@ workflows:
         script: |
           set -e
           
-          # 1. Find the workspace root
-          WORKSPACE_DIR=$(find . -maxdepth 4 -name "pnpm-workspace.yaml" 2>/dev/null | head -1 | xargs dirname)
-          if [ -z "$WORKSPACE_DIR" ] || [ "$WORKSPACE_DIR" = "." ]; then
-            WORKSPACE_ABS=$(pwd)
-          else
-            WORKSPACE_ABS=$(cd "$WORKSPACE_DIR" && pwd)
-          fi
-          echo "Workspace root found at: $WORKSPACE_ABS"
-
-          # 2. Find the application folder
-          APP_DIR=$(find . -maxdepth 4 -name "app.json" -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
-          APP_ABS=$(cd "$APP_DIR" && pwd)
-          echo "Expo app package found at: $APP_ABS"
-
-          # 3. Patch configuration files safely
-          cd "$APP_ABS"
+          # Run directly from the workspace root folder where pnpm-workspace.yaml is
+          echo "=== Patching workspace configuration ==="
           if [ -f "pnpm-workspace.yaml" ]; then
             sed -i 's|  - artifacts/\*|  - flashlight-strobe|' pnpm-workspace.yaml
             sed -i '/^  - lib\/\*/d' pnpm-workspace.yaml
@@ -67,6 +54,7 @@ workflows:
             sed -i '/^  - scripts/d' pnpm-workspace.yaml
           fi
 
+          echo "=== Removing incompatible private workspaces ==="
           node -e "
             const fs = require('fs');
             if (fs.existsSync('package.json')) {
@@ -76,33 +64,26 @@ workflows:
             }
           "
 
-          # 4. Clean workspace installation
-          cd "$WORKSPACE_ABS"
+          # Clean workspace install at the root level using the correct manager context
+          echo "=== Running pnpm install ==="
           pnpm install --no-frozen-lockfile --shamefully-hoist
 
       - name: Build release APK
         script: |
           set -e
           
-          # Find the app and workspace directories again for isolation
-          WORKSPACE_DIR=$(find . -maxdepth 4 -name "pnpm-workspace.yaml" 2>/dev/null | head -1 | xargs dirname)
-          if [ -z "$WORKSPACE_DIR" ] || [ "$WORKSPACE_DIR" = "." ]; then WORKSPACE_ABS=$(pwd); else WORKSPACE_ABS=$(cd "$WORKSPACE_DIR" && pwd); fi
+          # Define exact workspace and app locations based on known monorepo structure
+          REPO_ROOT=$(pwd)
+          APP_ABS="$REPO_ROOT/flashlight-strobe"
           
-          APP_DIR=$(find . -maxdepth 4 -name "app.json" -exec grep -l '"expo"' {} \; 2>/dev/null | head -1 | xargs dirname)
-          APP_ABS=$(cd "$APP_DIR" && pwd)
-
           echo "=== Pre-bundling JS via isolated expo export:embed ==="
           mkdir -p "$APP_ABS/android/app/src/main/assets"
           
-          # Locate absolute binary path inside workspace
-          EXPO_BIN=$(find "$WORKSPACE_ABS/node_modules/.bin" "$APP_ABS/node_modules/.bin" -name "expo" -type f 2>/dev/null | head -1)
-          if [ -z "$EXPO_BIN" ]; then
-            echo "Error: Cannot find binary execution path for expo. Checking local node modules fallback..."
-            EXPO_BIN="$APP_ABS/node_modules/expo/bin/cli.js"
-          fi
-          echo "Using expo binary path: $EXPO_BIN"
+          # Target the exact binary built into the workspace root node_modules
+          EXPO_BIN="$REPO_ROOT/node_modules/.bin/expo"
+          echo "Using verified expo binary path: $EXPO_BIN"
           
-          # Bundle from app target root directory 
+          # Execute the bundler cleanly from the inner app folder
           cd "$APP_ABS"
           NODE_ENV=production "$EXPO_BIN" export:embed \
             --platform android \
@@ -112,19 +93,10 @@ workflows:
             --dev false
 
           echo "=== Native Bundle compilation completed successfully ==="
-          echo "=== Launching Gradle distribution compilation (Skipping broken bundle sub-task) ==="
+          echo "=== Launching Gradle distribution compilation ==="
           
-          # EXPLICIT FIX: Isolate search to explicitly exclude node_modules paths entirely
-          GRADLEW_PATH=$(find "$APP_ABS" -maxdepth 3 -name "gradlew" -not -path "*/node_modules/*" -type f 2>/dev/null | head -1)
-          if [ -z "$GRADLEW_PATH" ]; then
-            # Direct static fallback strategy matching expected workspace structures
-            GRADLEW_PATH="$APP_ABS/android/gradlew"
-          fi
-          
-          GRADLE_DIR=$(dirname "$GRADLEW_PATH")
-          echo "Located real native Android project root at: $GRADLE_DIR"
-          
-          cd "$GRADLE_DIR"
+          # Navigate directly into the explicit android folder to avoid matching plugins
+          cd "$APP_ABS/android"
           chmod +x ./gradlew
           ./gradlew assembleRelease -x createBundleReleaseJsAndAssets --no-daemon
 
@@ -136,16 +108,18 @@ workflows:
             exit 0
           fi
 
-          # Safe runtime traversal scan to catch compiled APK binaries anywhere in output build paths
-          APK=$(find . -path "*/app/build/outputs/apk/*.apk" -o -path "*/app/build/outputs/apk/**/*.apk" 2>/dev/null | head -1)
+          REPO_ROOT=$(pwd)
+          APP_ABS="$REPO_ROOT/flashlight-strobe"
+
+          # Locate built binary artifact explicitly via local output paths
+          APK=$(find "$APP_ABS/android" -path "*/app/build/outputs/apk/*.apk" -o -path "*/app/build/outputs/apk/**/*.apk" 2>/dev/null | head -1)
           if [ -z "$APK" ]; then echo "Build failure: No compiled APK artifact detected."; exit 1; fi
 
-          APP_JSON=$(find . -maxdepth 4 -name "app.json" -exec grep -l '"expo"' {} \; 2>/dev/null | head -1)
-          VERSION=$(node -e "console.log(require('$APP_JSON').expo.version)")
+          VERSION=$(node -e "console.log(require('$APP_ABS/app.json').expo.version)")
           TIMESTAMP=$(date +%Y%m%d-%H%M%S)
           VERSIONED="flashlight-strobe-v${VERSION}-${TIMESTAMP}.apk"
           LATEST="flashlight-strobe-latest.apk"
-
+          
           upload() {
             HTTP=$(curl -fsSL -o /dev/null -w "%{http_code}" \
               -X POST \
