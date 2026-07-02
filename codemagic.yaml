@@ -9,9 +9,11 @@ workflows:
         - SUPABASE  # SUPABASE_URL, SUPABASE_KEY, SUPABASE_BUCKET
 
     scripts:
-      - name: Install pnpm 9
+      - name: Ensure pnpm 9
         script: |
-          npm install -g pnpm@9
+          # Codemagic Mac images ship with pnpm pre-installed; skip reinstall if present
+          pnpm --version | grep -q '^9\.' && echo "pnpm 9 already installed" && exit 0
+          npm install -g pnpm@9 --force
 
       - name: Install JS deps + babel-preset-expo fix
         script: |
