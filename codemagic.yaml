@@ -17,22 +17,12 @@ workflows:
           pnpm --version | grep -q '^9\.' && echo "pnpm 9 already installed" && exit 0
           npm install -g pnpm@9 --force
 
-      - name: Install JS deps + babel-preset-expo fix
+      - name: Install JS deps
         script: |
-          # IMPORTANT: capture REPO_ROOT before any cd — never after
           REPO_ROOT=$(pwd)
-          APP_NM="$REPO_ROOT/flashlight-strobe-github/flashlight-strobe/node_modules"
-
-          # Install workspace deps (shamefully-hoist so Metro can resolve them)
           cd "$REPO_ROOT/flashlight-strobe-github"
+          # --shamefully-hoist so Metro can resolve all hoisted packages
           pnpm install --no-frozen-lockfile --shamefully-hoist
-
-          # Bug 1 fix: babel-preset-expo is NOT in the app's package.json (catalog:
-          # conflict prevents adding it there). Install it in a temp dir and copy in.
-          mkdir -p /tmp/bpe && cd /tmp/bpe
-          npm init -y > /dev/null 2>&1
-          npm install babel-preset-expo --legacy-peer-deps --no-package-lock
-          cp -r node_modules/babel-preset-expo "$APP_NM/"
 
       - name: Expo prebuild
         script: |
@@ -113,6 +103,57 @@ workflows:
           open(path, 'w').write(text)
           print("build.gradle patched OK")
           PYEOF
+
+      - name: Patch react-native-svg (hermesc private-field fix)
+        # react-native-svg@15.x uses ES2022 private class fields (#x #y #width #height).
+        # hermesc (Hermes AOT compiler) cannot compile them, even when Metro+Babel are
+        # correctly configured — because metro-react-native-babel-preset intentionally
+        # skips private-field transforms when targeting Hermes runtime.
+        #
+        # Fix: rewrite private class field syntax directly in the pnpm virtual-store
+        # source before Gradle bundles them. `#name` → `_pvtname` everywhere in src/.
+        # This is safe: all usages are internal to the class; no external code accesses them.
+        script: |
+          REPO_ROOT=$(pwd)
+          # Write the patch script to a temp file to avoid heredoc escaping issues
+          cat > /tmp/patch-rnssvg.js << 'JSEOF'
+          const fs = require('fs'), path = require('path');
+          const repoRoot = process.argv[2];
+          const pnpmStore = path.join(repoRoot, 'flashlight-strobe-github', 'node_modules', '.pnpm');
+
+          // Find react-native-svg in the pnpm virtual store
+          let svgDir = null;
+          for (const entry of fs.readdirSync(pnpmStore)) {
+            if (entry.startsWith('react-native-svg@')) {
+              const candidate = path.join(pnpmStore, entry, 'node_modules', 'react-native-svg');
+              if (fs.existsSync(candidate)) { svgDir = candidate; break; }
+            }
+          }
+          if (!svgDir) { console.log('react-native-svg not found in pnpm store — skipping'); process.exit(0); }
+          console.log('Patching react-native-svg at:', svgDir);
+
+          // Replace #fieldName → _pvtfieldName in all source files
+          // Handles: `#x;`  `#x = val`  `this.#x`  `#method() {}`
+          let patchCount = 0;
+          function walk(dir) {
+            for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+              const p = path.join(dir, entry.name);
+              if (entry.isDirectory()) { walk(p); continue; }
+              if (!/\.(js|ts|tsx|mjs|cjs)$/.test(entry.name)) continue;
+              const src = fs.readFileSync(p, 'utf8');
+              // Replace every #identifier occurrence (field decl, field access, private method)
+              const out = src.replace(/#([a-zA-Z_$][a-zA-Z0-9_$]*)/g, '_pvt$1');
+              if (out !== src) {
+                fs.writeFileSync(p, out);
+                console.log('  patched:', entry.name);
+                patchCount++;
+              }
+            }
+          }
+          walk(path.join(svgDir, 'src'));
+          console.log('Done —', patchCount, 'file(s) patched');
+          JSEOF
+          node /tmp/patch-rnssvg.js "$REPO_ROOT"
 
       - name: Build release APK
         script: |
