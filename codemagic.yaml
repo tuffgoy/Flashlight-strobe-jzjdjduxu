@@ -36,8 +36,8 @@ workflows:
         script: |
           REPO_ROOT=$(pwd)
           cd "$REPO_ROOT/flashlight-strobe-github"
-          # pnpm exec resolves the expo binary from the package's own node_modules
-          pnpm --filter flashlight-strobe exec expo prebuild --platform android --no-install --clean
+          # pnpm run sets up .bin PATH correctly for the package — more reliable than npx/exec
+          pnpm --filter @workspace/flashlight-strobe run prebuild:android
 
       - name: Restore pnpm-aware metro.config.js (belt-and-suspenders)
         # expo prebuild may overwrite metro.config.js. Decode the committed
