@@ -1,125 +1,144 @@
 workflows:
-  android-apk:
-    name: Flashlight Strobe - Release APK
-    max_build_duration: 90
+  build-release-apk:
+    name: Build Release APK
+    max_build_duration: 60
+    instance_type: mac_mini_m1
     environment:
-      java: 17
       groups:
-        - SUPABASE
-        - CM
-      vars:
-        COREPACK_ENABLE_STRICT: "0"
-    cache:
-      cache_paths:
-        - ~/.gradle/caches
-        - ~/.gradle/wrapper
-        - $HOME/.cache/pnpm
-    triggering:
-      events:
-        - push
-      branch_patterns:
-        - pattern: main
-          include: true
+        - CM        # CM_KEYSTORE, CM_KEY_ALIAS, CM_KEYSTORE_PASSWORD, CM_KEY_PASSWORD
+        - SUPABASE  # SUPABASE_URL, SUPABASE_KEY, SUPABASE_BUCKET
 
     scripts:
-      - name: Install pnpm
-        script: npm install -g pnpm@9 --force
-
-      - name: Install JS dependencies
+      - name: Install pnpm 9
         script: |
-          set -e
+          npm install -g pnpm@9
+
+      - name: Install JS deps + babel-preset-expo fix
+        script: |
+          # IMPORTANT: capture REPO_ROOT before any cd — never after
           REPO_ROOT=$(pwd)
           APP_NM="$REPO_ROOT/flashlight-strobe-github/flashlight-strobe/node_modules"
-          cd flashlight-strobe-github
+
+          # Install workspace deps (shamefully-hoist so Metro can resolve them)
+          cd "$REPO_ROOT/flashlight-strobe-github"
           pnpm install --no-frozen-lockfile --shamefully-hoist
-          # babel-preset-expo is not declared in the app's package.json but
-          # babel.config.js requires it. pnpm isolates it inside .pnpm/ so
-          # Babel cannot find it. Install in a temp dir then copy to app's
-          # node_modules (can't run npm install in the app dir — package.json
-          # has catalog: entries that npm doesn't understand).
+
+          # Bug 1 fix: babel-preset-expo is NOT in the app's package.json (catalog:
+          # conflict prevents adding it there). Install it in a temp dir and copy in.
           mkdir -p /tmp/bpe && cd /tmp/bpe
           npm init -y > /dev/null 2>&1
           npm install babel-preset-expo --legacy-peer-deps --no-package-lock
-          mkdir -p "$APP_NM"
           cp -r node_modules/babel-preset-expo "$APP_NM/"
 
       - name: Expo prebuild
         script: |
-          set -e
-          cd flashlight-strobe-github/flashlight-strobe
-          pnpm exec expo prebuild --platform android --clean --no-install
+          REPO_ROOT=$(pwd)
+          cd "$REPO_ROOT/flashlight-strobe-github/flashlight-strobe"
+          npx expo prebuild --platform android --no-install --clean
 
-      - name: Fix metro config
+      - name: Restore pnpm-aware metro.config.js (belt-and-suspenders)
+        # expo prebuild may overwrite metro.config.js. Decode the committed
+        # version from base64 to guarantee the pnpm-aware regex is always present.
+        #
+        # Bug 2+3 fix: react-native-svg@15.x uses ES2022 private class fields
+        # (#x, #y, #width, #height). hermesc rejects them. Metro must transform
+        # react-native-svg, but the standard transformIgnorePatterns regex fails
+        # silently with pnpm because pnpm stores packages at:
+        #   node_modules/.pnpm/<pkg>@<ver>_<hash>/node_modules/<pkg>/
+        # The negative lookahead sees ".pnpm" (not in the allowlist) at the first
+        # "node_modules/" and marks every package as ignored.
+        # The fix: add optional (\.pnpm\/[^/]+\/node_modules\/)? inside the lookahead.
         script: |
-          set -e
-          # Write metro.config.js with a pnpm-aware transformIgnorePatterns regex.
-          # Done AFTER prebuild (safety) and via base64 decode (no escaping issues).
-          # Uses base64 -D (macOS/BSD flag) — not -d or --decode which are Linux/GNU.
-          #
-          # Root cause of the hermesc "private properties are not supported" error:
-          #   pnpm stores packages at node_modules/.pnpm/<pkg>@<ver>/node_modules/<pkg>/
-          #   A standard Metro transformIgnorePatterns regex matches on the FIRST
-          #   "node_modules/" and sees ".pnpm" next, so the negative lookahead
-          #   passes and ALL pnpm packages are treated as ignored (not Babel-
-          #   transformed). react-native-svg's private class fields survive into
-          #   the bundle and hermesc rejects them.
-          # Fix: the regex adds (.pnpm/[^/]+/node_modules/)? inside the lookahead
-          #   so it correctly sees through the pnpm prefix to the real package name.
-          printf '%s' 'Y29uc3QgeyBnZXREZWZhdWx0Q29uZmlnIH0gPSByZXF1aXJlKCdleHBvL21ldHJvLWNvbmZpZycpOwpjb25zdCBjb25maWcgPSBnZXREZWZhdWx0Q29uZmlnKF9fZGlybmFtZSk7CgovLyByZWFjdC1uYXRpdmUtc3ZnIHYxNSsgc2hpcHMgRVMyMDIyIHByaXZhdGUgY2xhc3MgZmllbGRzICgjeCwgI3ksIGV0Yy4pCi8vIHRoYXQgaGVybWVzYyBjYW5ub3QgY29tcGlsZS4gRXh0ZW5kIHRyYW5zZm9ybUlnbm9yZVBhdHRlcm5zIHNvIHRoZXNlCi8vIHBhY2thZ2VzIGFyZSBCYWJlbC10cmFuc2Zvcm1lZCBiZWZvcmUgdGhlIGJ1bmRsZSByZWFjaGVzIGhlcm1lc2MuCi8vCi8vIElNUE9SVEFOVDogTWV0cm8gcmVxdWlyZXMgUmVnRXhwIG9iamVjdHMg4oCUIHBsYWluIHN0cmluZ3MgYXJlIHNpbGVudGx5IGlnbm9yZWQuCi8vCi8vIFBOUE0gUEFUSCBGSVg6IHBucG0gc3RvcmVzIHBhY2thZ2VzIGF0OgovLyAgIG5vZGVfbW9kdWxlcy8ucG5wbS88cGtnPkA8dmVyPl88aGFzaD4vbm9kZV9tb2R1bGVzLzxwa2c+LwovLyBBIHN0YW5kYXJkIHJlZ2V4IGxpa2UgL25vZGVfbW9kdWxlc1wvKD8hKHJlYWN0LW5hdGl2ZS1zdmcpXC8uKikvIHRlc3RzIGFnYWluc3QKLy8gdGhlIGZ1bGwgZmlsZSBwYXRoIGFuZCBtYXRjaGVzIG9uIHRoZSBGSVJTVCAibm9kZV9tb2R1bGVzLyIsIHNlZWluZyAiLnBucG0iCi8vIG5leHQg4oCUIHNvIHRoZSBuZWdhdGl2ZSBsb29rYWhlYWQgcGFzc2VzIGFuZCBBTEwgcG5wbSBwYWNrYWdlcyBhcmUgaWdub3JlZC4KLy8gRml4OiBhZGQgKC5wbnBtXC9bXi9dK1wvbm9kZV9tb2R1bGVzXC8pPyBpbnNpZGUgdGhlIGxvb2thaGVhZCBzbyB0aGUgcmVnZXgKLy8gY29ycmVjdGx5IHBlZWtzIHRocm91Z2ggdGhlIHBucG0gcHJlZml4IHRvIGZpbmQgdGhlIHJlYWwgcGFja2FnZSBuYW1lLgpjb25maWcudHJhbnNmb3JtZXIudHJhbnNmb3JtSWdub3JlUGF0dGVybnMgPSBbCiAgL25vZGVfbW9kdWxlc1wvKD8hKFwucG5wbVwvW14vXStcL25vZGVfbW9kdWxlc1wvKT8oKGplc3QtKT9yZWFjdC1uYXRpdmV8QHJlYWN0LW5hdGl2ZSgtY29tbXVuaXR5KT98ZXhwbyhuZW50KT98QGV4cG8obmVudCk/XC8uKnxAZXhwby1nb29nbGUtZm9udHNcLy4qfHJlYWN0LW5hdmlnYXRpb258QHJlYWN0LW5hdmlnYXRpb25cLy4qfEB1bmltb2R1bGVzXC8uKnx1bmltb2R1bGVzfHNlbnRyeS1leHBvfG5hdGl2ZS1iYXNlfEBzZW50cnlcLy4qfHJlYWN0LW5hdGl2ZS1zdmd8cmVhY3QtbmF0aXZlLXJlYW5pbWF0ZWR8cmVhY3QtbmF0aXZlLXdvcmtsZXRzfHJlYWN0LW5hdGl2ZS1zY3JlZW5zfHJlYWN0LW5hdGl2ZS1nZXN0dXJlLWhhbmRsZXJ8cmVhY3QtbmF0aXZlLXNhZmUtYXJlYS1jb250ZXh0fHJlYWN0LW5hdGl2ZS1rZXlib2FyZC1jb250cm9sbGVyKVwvKS8sCl07Cgptb2R1bGUuZXhwb3J0cyA9IGNvbmZpZzsK' \
-            | base64 -D > flashlight-strobe-github/flashlight-strobe/metro.config.js
-          grep -q 'pnpm' flashlight-strobe-github/flashlight-strobe/metro.config.js \
-            && echo "metro.config.js written OK" \
-            || { echo "ERROR: metro.config.js decode failed"; exit 1; }
+          REPO_ROOT=$(pwd)
+          echo 'Ly8gbWV0cm8uY29uZmlnLmpzIOKAlCBwbnBtLWF3YXJlIHRyYW5zZm9ybUlnbm9yZVBhdHRlcm5zCi8vIENPTU1JVFRFRCBTT1VSQ0UgRklMRSDigJQgZG8gbm90IHNpbXBsaWZ5IHRoZSByZWdleCBiYWNrIHRvIGEgc3RhbmRhcmQgb25lLgovLwovLyBXSFkgVEhJUyBJUyBORUVERUQ6Ci8vIHBucG0gc3RvcmVzIHBhY2thZ2VzIGF0OgovLyAgIG5vZGVfbW9kdWxlcy8ucG5wbS88cGtnPkA8dmVyPl88aGFzaD4vbm9kZV9tb2R1bGVzLzxwa2c+L3NyYy9maWxlLmpzCi8vCi8vIFN0YW5kYXJkIE1ldHJvIHJlZ2V4IChlLmcuIC9ub2RlX21vZHVsZXNcLyg/IShyZWFjdC1uYXRpdmUtc3ZnKVwvLiopXC8vKToKLy8gICAtIFRlc3RzIGFnYWluc3QgdGhlIEZVTEwgYWJzb2x1dGUgZmlsZSBwYXRoCi8vICAgLSBNYXRjaGVzIG9uIHRoZSBGSVJTVCAibm9kZV9tb2R1bGVzLyIg4oCUIHdoaWNoIHNlZXMgIi5wbnBtIiBpbW1lZGlhdGVseSBhZnRlcgovLyAgIC0gTmVnYXRpdmUgbG9va2FoZWFkIHBhc3NlcyAoLnBucG0gaXMgbm90IGluIHRoZSBhbGxvd2xpc3QpIOKGkiBmaWxlIElHTk9SRUQKLy8gICAtIHJlYWN0LW5hdGl2ZS1zdmcgZ2V0cyBzaWxlbnRseSBza2lwcGVkOyBoZXJtZXNjIHNlZXMgcmF3IEVTMjAyMiBwcml2YXRlIGZpZWxkcwovLwovLyBGSVg6IGFkZCBvcHRpb25hbCAoXC5wbnBtXC9bXi9dK1wvbm9kZV9tb2R1bGVzXC8pPyBwcmVmaXggaW5zaWRlIHRoZSBsb29rYWhlYWQKLy8gc28gdGhlIHJlZ2V4IGNvcnJlY3RseSBzZWVzIHRoZSByZWFsIHBhY2thZ2UgbmFtZSBldmVuIGluIHBucG0ncyBuZXN0ZWQgc3RydWN0dXJlLgoKY29uc3QgeyBnZXREZWZhdWx0Q29uZmlnIH0gPSByZXF1aXJlKCdleHBvL21ldHJvLWNvbmZpZycpOwoKY29uc3QgY29uZmlnID0gZ2V0RGVmYXVsdENvbmZpZyhfX2Rpcm5hbWUpOwoKY29uZmlnLnRyYW5zZm9ybWVyID0gY29uZmlnLnRyYW5zZm9ybWVyIHx8IHt9Owpjb25maWcudHJhbnNmb3JtZXIudHJhbnNmb3JtSWdub3JlUGF0dGVybnMgPSBbCiAgL25vZGVfbW9kdWxlc1wvKD8hKFwucG5wbVwvW14vXStcL25vZGVfbW9kdWxlc1wvKT8oKGplc3QtKT9yZWFjdC1uYXRpdmV8QHJlYWN0LW5hdGl2ZSgtY29tbXVuaXR5KT98ZXhwbyhuZW50KT98QGV4cG8obmVudCk/XC8uKnxAZXhwby1nb29nbGUtZm9udHNcLy4qfHJlYWN0LW5hdmlnYXRpb258QHJlYWN0LW5hdmlnYXRpb25cLy4qfEB1bmltb2R1bGVzXC8uKnx1bmltb2R1bGVzfHNlbnRyeS1leHBvfG5hdGl2ZS1iYXNlfHJlYWN0LW5hdGl2ZS1zdmcpXC8pLiovLApdOwoKbW9kdWxlLmV4cG9ydHMgPSBjb25maWc7Cg==' \
+            | base64 -d > "$REPO_ROOT/flashlight-strobe-github/flashlight-strobe/metro.config.js"
+          echo "metro.config.js restored — pnpm-aware transformIgnorePatterns in place"
 
-      - name: Configure Android
+      - name: Configure Android signing
         script: |
-          set -e
-          ANDROID_DIR=flashlight-strobe-github/flashlight-strobe/android
+          REPO_ROOT=$(pwd)
+          ANDROID_DIR="$REPO_ROOT/flashlight-strobe-github/flashlight-strobe/android"
+
+          # local.properties
           echo "sdk.dir=$ANDROID_SDK_ROOT" > "$ANDROID_DIR/local.properties"
-          echo "$CM_KEYSTORE" | base64 -D > "$ANDROID_DIR/app/release.keystore"
-          cat >> "$ANDROID_DIR/gradle.properties" << PROPS
-          MYAPP_RELEASE_STORE_FILE=release.keystore
-          MYAPP_RELEASE_KEY_ALIAS=${CM_KEY_ALIAS}
-          MYAPP_RELEASE_STORE_PASSWORD=${CM_KEYSTORE_PASSWORD}
-          MYAPP_RELEASE_KEY_PASSWORD=${CM_KEY_PASSWORD}
-          PROPS
-          node -e "
-            var fs = require('fs');
-            var file = '$ANDROID_DIR/app/build.gradle';
-            var src = fs.readFileSync(file, 'utf8');
-            if (!src.includes('MYAPP_RELEASE_STORE_FILE')) {
-              src = src.replace(/signingConfigs\s*\{/, 'signingConfigs {\n        release {\n            storeFile file(MYAPP_RELEASE_STORE_FILE)\n            storePassword MYAPP_RELEASE_STORE_PASSWORD\n            keyAlias MYAPP_RELEASE_KEY_ALIAS\n            keyPassword MYAPP_RELEASE_KEY_PASSWORD\n        }');
-            }
-            src = src.replace(/signingConfig signingConfigs\.debug/g, 'signingConfig signingConfigs.release');
-            fs.writeFileSync(file, src);
-          "
+
+          # Decode keystore
+          echo "$CM_KEYSTORE" | base64 -d > /tmp/release.keystore
+
+          # Patch android/app/build.gradle to add release signing config
+          python3 - "$ANDROID_DIR/app/build.gradle" <<'PYEOF'
+          import sys, re
+
+          path = sys.argv[1]
+          text = open(path).read()
+
+          signing_block = """
+              signingConfigs {
+                  release {
+                      storeFile file('/tmp/release.keystore')
+                      storePassword System.getenv('CM_KEYSTORE_PASSWORD')
+                      keyAlias System.getenv('CM_KEY_ALIAS')
+                      keyPassword System.getenv('CM_KEY_PASSWORD')
+                  }
+              }
+          """
+
+          # Insert signingConfigs before the buildTypes block (idempotent guard)
+          if 'signingConfigs {' not in text:
+              text = re.sub(r'(\s*buildTypes\s*\{)', signing_block + r'\1', text, count=1)
+
+          # Point release buildType at the release signingConfig
+          text = re.sub(
+              r'(buildTypes\s*\{[^}]*release\s*\{[^}]*?)signingConfig\s+signingConfigs\.\w+',
+              r'\1signingConfig signingConfigs.release',
+              text,
+              flags=re.DOTALL,
+          )
+
+          # If there was no existing signingConfig line inside release {}, add one
+          if 'signingConfigs.release' not in text:
+              text = re.sub(
+                  r'(buildTypes\s*\{[^}]*release\s*\{)',
+                  r'\1\n            signingConfig signingConfigs.release',
+                  text,
+                  flags=re.DOTALL,
+              )
+
+          open(path, 'w').write(text)
+          print("build.gradle patched OK")
+          PYEOF
 
       - name: Build release APK
         script: |
-          set -e
-          cd flashlight-strobe-github/flashlight-strobe/android
-          chmod +x ./gradlew
+          REPO_ROOT=$(pwd)
+          cd "$REPO_ROOT/flashlight-strobe-github/flashlight-strobe/android"
           ./gradlew assembleRelease --no-daemon
 
-    artifacts:
-      - "**/app/build/outputs/apk/**/*.apk"
+      - name: Upload to Supabase Storage
+        script: |
+          REPO_ROOT=$(pwd)
+          APK="$REPO_ROOT/flashlight-strobe-github/flashlight-strobe/android/app/build/outputs/apk/release/app-release.apk"
 
-    publishing:
-      scripts:
-        - name: Upload to Supabase
-          script: |
-            set -e
-            APK=$(find . -path "*/app/build/outputs/apk/**/*.apk" | head -1)
-            [ -z "$APK" ] && { echo "No APK found"; exit 1; }
-            VERSION=$(node -e "console.log(require('./flashlight-strobe-github/flashlight-strobe/app.json').expo.version)")
-            TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-            for NAME in "flashlight-strobe-v${VERSION}-${TIMESTAMP}.apk" "flashlight-strobe-latest.apk"; do
-              HTTP=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
-                "${SUPABASE_URL}/storage/v1/object/${SUPABASE_BUCKET}/${NAME}?upsert=true" \
-                -H "Authorization: Bearer ${SUPABASE_KEY}" \
-                -H "Content-Type: application/octet-stream" \
-                -H "x-upsert: true" \
-                --data-binary @"$APK")
-              echo "$NAME -> HTTP $HTTP"
-              [ "$HTTP" -ge 200 ] && [ "$HTTP" -lt 300 ] || exit 1
-            done
+          # Read version from app.json
+          VERSION=$(python3 -c "import json; d=json.load(open('$REPO_ROOT/flashlight-strobe-github/flashlight-strobe/app.json')); print(d['expo']['version'])")
+          echo "Uploading APK version: $VERSION"
+
+          # Upload versioned copy (POST — creates new object)
+          curl -fsSL -X POST \
+            "$SUPABASE_URL/storage/v1/object/$SUPABASE_BUCKET/flashlight-strobe-v${VERSION}.apk" \
+            -H "Authorization: Bearer $SUPABASE_KEY" \
+            -H "Content-Type: application/octet-stream" \
+            --data-binary @"$APK"
+
+          # Upload / overwrite latest (upsert)
+          curl -fsSL -X POST \
+            "$SUPABASE_URL/storage/v1/object/$SUPABASE_BUCKET/flashlight-strobe-latest.apk" \
+            -H "Authorization: Bearer $SUPABASE_KEY" \
+            -H "x-upsert: true" \
+            -H "Content-Type: application/octet-stream" \
+            --data-binary @"$APK"
+
+          echo "Upload complete — flashlight-strobe-v${VERSION}.apk + flashlight-strobe-latest.apk"
+
+    artifacts:
+      - flashlight-strobe-github/flashlight-strobe/android/app/build/outputs/apk/release/app-release.apk
