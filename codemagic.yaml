@@ -36,7 +36,8 @@ workflows:
         script: |
           REPO_ROOT=$(pwd)
           cd "$REPO_ROOT/flashlight-strobe-github/flashlight-strobe"
-          npx expo prebuild --platform android --no-install --clean
+          # Use the workspace-installed expo binary (not npx which re-downloads it)
+          "$REPO_ROOT/flashlight-strobe-github/node_modules/.bin/expo" prebuild --platform android --no-install --clean
 
       - name: Restore pnpm-aware metro.config.js (belt-and-suspenders)
         # expo prebuild may overwrite metro.config.js. Decode the committed
