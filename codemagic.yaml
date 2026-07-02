@@ -14,7 +14,6 @@ workflows:
         - ~/.gradle/caches
         - ~/.gradle/wrapper
         - $HOME/.cache/pnpm
-
     triggering:
       events:
         - push
@@ -23,165 +22,81 @@ workflows:
           include: true
 
     scripts:
-      # ── 1. pnpm ────────────────────────────────────────────────────────────
       - name: Install pnpm
-        script: |
-          corepack disable || true
-          npm install -g pnpm@9 --force
-          pnpm --version
+        script: npm install -g pnpm@9 --force
 
-      # ── 2. JS dependencies ─────────────────────────────────────────────────
-      #
-      # IMPORTANT: The repo root has a separate package.json that is NOT the
-      # Expo project. The actual pnpm workspace lives in flashlight-strobe-github/.
-      # We must cd there before running any pnpm commands.
       - name: Install JS dependencies
         script: |
           set -e
-
-          # Capture repo root BEFORE any cd — used for absolute paths later.
           REPO_ROOT=$(pwd)
           APP_NM="$REPO_ROOT/flashlight-strobe-github/flashlight-strobe/node_modules"
-
-          # The pnpm workspace root — this is where pnpm-workspace.yaml lives.
           cd flashlight-strobe-github
-
-          # Install everything in the workspace (flashlight-strobe member + root deps).
-          # --shamefully-hoist puts all packages flat in node_modules so tools
-          # that do upward require() resolution can find them.
           pnpm install --no-frozen-lockfile --shamefully-hoist
-
-          # ── babel-preset-expo fix ──────────────────────────────────────────
-          # babel.config.js requires babel-preset-expo, but it is NOT listed
-          # in the app's package.json devDependencies. pnpm's module isolation
-          # means it lives only inside the .pnpm virtual store, unreachable by
-          # Babel when Metro's jest-worker spawns node subprocesses during
-          # createBundleReleaseJsAndAssets.
-          #
-          # We cannot run `npm install` inside the app directory because its
-          # package.json uses pnpm catalog: references (e.g. "react": "catalog:")
-          # that npm does not understand — it throws EUNSUPPORTEDPROTOCOL.
-          #
-          # Solution: install babel-preset-expo in a clean temp directory that
-          # has no package.json with catalog: entries, then copy the resulting
-          # package folder into the app's own node_modules. Node/Metro resolves
-          # modules by walking up from the file's directory, so
-          # flashlight-strobe/node_modules/babel-preset-expo/ is found first.
-          echo "Installing babel-preset-expo via temp dir (avoids catalog: protocol)..."
-          mkdir -p /tmp/bpe-install
-          cd /tmp/bpe-install
+          # babel-preset-expo is not declared in the app's package.json but
+          # babel.config.js requires it. pnpm isolates it inside .pnpm/ so
+          # Babel cannot find it. Install in a temp dir then copy to app's
+          # node_modules (can't run npm install in the app dir — package.json
+          # has catalog: entries that npm doesn't understand).
+          mkdir -p /tmp/bpe && cd /tmp/bpe
           npm init -y > /dev/null 2>&1
           npm install babel-preset-expo --legacy-peer-deps --no-package-lock
           mkdir -p "$APP_NM"
-          cp -r /tmp/bpe-install/node_modules/babel-preset-expo "$APP_NM/"
-          echo "Installed — $APP_NM/babel-preset-expo"
-          cd "$REPO_ROOT"
+          cp -r node_modules/babel-preset-expo "$APP_NM/"
 
-      # ── 3. Patch metro config for Hermes compatibility ─────────────────────
-      - name: Patch metro config
-        script: |
-          set -e
-          # react-native-svg v15+ (and potentially other packages) ship JavaScript
-          # source that uses ES2022 private class fields (#x, #y, #width, #height).
-          # Metro's default transformIgnorePatterns does NOT transform these packages
-          # via Babel, so the private fields survive into the bundle. hermesc then
-          # rejects them: "private properties are not supported".
-          #
-          # Fix: overwrite metro.config.js, extending transformIgnorePatterns so
-          # all listed packages are run through Babel and private fields are lowered
-          # to Hermes-compatible syntax before hermesc sees the bundle.
-          #
-          # NOTE: we use string concatenation only (no template literals, no nested
-          # quotes) so there is zero shell-escaping ambiguity in the node -e call.
-          node -e "
-            var fs = require('fs');
-            var pkgs = [
-              '(jest-)?react-native',
-              '@react-native(-community)?',
-              'expo(nent)?',
-              '@expo(nent)?/.*',
-              '@expo-google-fonts/.*',
-              'react-navigation',
-              '@react-navigation/.*',
-              '@unimodules/.*',
-              'unimodules',
-              'sentry-expo',
-              'native-base',
-              '@sentry/.*',
-              'react-native-svg',
-              'react-native-reanimated',
-              'react-native-worklets',
-              'react-native-screens',
-              'react-native-gesture-handler',
-              'react-native-safe-area-context',
-            ].join('|');
-            var pattern = 'node_modules/(?!(' + pkgs + ')/.*)';
-            var lines = [
-              \"const { getDefaultConfig } = require('expo/metro-config');\",
-              'const config = getDefaultConfig(__dirname);',
-              '// Extended transformIgnorePatterns: ensures packages with ES2022',
-              '// private class fields are transformed by Babel before hermesc.',
-              'config.transformer.transformIgnorePatterns = [',
-              \"  '\" + pattern + \"',\",
-              '];',
-              'module.exports = config;',
-            ];
-            fs.writeFileSync(
-              'flashlight-strobe-github/flashlight-strobe/metro.config.js',
-              lines.join('\n') + '\n'
-            );
-            console.log('metro.config.js patched — transformIgnorePatterns extended');
-          "
-
-      # ── 4. Generate native Android project ─────────────────────────────────
       - name: Expo prebuild
         script: |
           set -e
           cd flashlight-strobe-github/flashlight-strobe
           pnpm exec expo prebuild --platform android --clean --no-install
 
-      # ── 5. Android SDK path ────────────────────────────────────────────────
-      - name: Set Android SDK path
-        script: |
-          echo "sdk.dir=$ANDROID_SDK_ROOT" \
-            > flashlight-strobe-github/flashlight-strobe/android/local.properties
-
-      # ── 5. Release signing ─────────────────────────────────────────────────
-      - name: Configure release keystore
+      - name: Fix metro config
         script: |
           set -e
-          ANDROID_DIR="flashlight-strobe-github/flashlight-strobe/android"
+          # Write metro.config.js with a pnpm-aware transformIgnorePatterns regex.
+          # Done AFTER prebuild (safety) and via base64 decode (no escaping issues).
+          # Uses base64 -D (macOS/BSD flag) — not -d or --decode which are Linux/GNU.
+          #
+          # Root cause of the hermesc "private properties are not supported" error:
+          #   pnpm stores packages at node_modules/.pnpm/<pkg>@<ver>/node_modules/<pkg>/
+          #   A standard Metro transformIgnorePatterns regex matches on the FIRST
+          #   "node_modules/" and sees ".pnpm" next, so the negative lookahead
+          #   passes and ALL pnpm packages are treated as ignored (not Babel-
+          #   transformed). react-native-svg's private class fields survive into
+          #   the bundle and hermesc rejects them.
+          # Fix: the regex adds (.pnpm/[^/]+/node_modules/)? inside the lookahead
+          #   so it correctly sees through the pnpm prefix to the real package name.
+          printf '%s' 'Y29uc3QgeyBnZXREZWZhdWx0Q29uZmlnIH0gPSByZXF1aXJlKCdleHBvL21ldHJvLWNvbmZpZycpOwpjb25zdCBjb25maWcgPSBnZXREZWZhdWx0Q29uZmlnKF9fZGlybmFtZSk7CgovLyByZWFjdC1uYXRpdmUtc3ZnIHYxNSsgc2hpcHMgRVMyMDIyIHByaXZhdGUgY2xhc3MgZmllbGRzICgjeCwgI3ksIGV0Yy4pCi8vIHRoYXQgaGVybWVzYyBjYW5ub3QgY29tcGlsZS4gRXh0ZW5kIHRyYW5zZm9ybUlnbm9yZVBhdHRlcm5zIHNvIHRoZXNlCi8vIHBhY2thZ2VzIGFyZSBCYWJlbC10cmFuc2Zvcm1lZCBiZWZvcmUgdGhlIGJ1bmRsZSByZWFjaGVzIGhlcm1lc2MuCi8vCi8vIElNUE9SVEFOVDogTWV0cm8gcmVxdWlyZXMgUmVnRXhwIG9iamVjdHMg4oCUIHBsYWluIHN0cmluZ3MgYXJlIHNpbGVudGx5IGlnbm9yZWQuCi8vCi8vIFBOUE0gUEFUSCBGSVg6IHBucG0gc3RvcmVzIHBhY2thZ2VzIGF0OgovLyAgIG5vZGVfbW9kdWxlcy8ucG5wbS88cGtnPkA8dmVyPl88aGFzaD4vbm9kZV9tb2R1bGVzLzxwa2c+LwovLyBBIHN0YW5kYXJkIHJlZ2V4IGxpa2UgL25vZGVfbW9kdWxlc1wvKD8hKHJlYWN0LW5hdGl2ZS1zdmcpXC8uKikvIHRlc3RzIGFnYWluc3QKLy8gdGhlIGZ1bGwgZmlsZSBwYXRoIGFuZCBtYXRjaGVzIG9uIHRoZSBGSVJTVCAibm9kZV9tb2R1bGVzLyIsIHNlZWluZyAiLnBucG0iCi8vIG5leHQg4oCUIHNvIHRoZSBuZWdhdGl2ZSBsb29rYWhlYWQgcGFzc2VzIGFuZCBBTEwgcG5wbSBwYWNrYWdlcyBhcmUgaWdub3JlZC4KLy8gRml4OiBhZGQgKC5wbnBtXC9bXi9dK1wvbm9kZV9tb2R1bGVzXC8pPyBpbnNpZGUgdGhlIGxvb2thaGVhZCBzbyB0aGUgcmVnZXgKLy8gY29ycmVjdGx5IHBlZWtzIHRocm91Z2ggdGhlIHBucG0gcHJlZml4IHRvIGZpbmQgdGhlIHJlYWwgcGFja2FnZSBuYW1lLgpjb25maWcudHJhbnNmb3JtZXIudHJhbnNmb3JtSWdub3JlUGF0dGVybnMgPSBbCiAgL25vZGVfbW9kdWxlc1wvKD8hKFwucG5wbVwvW14vXStcL25vZGVfbW9kdWxlc1wvKT8oKGplc3QtKT9yZWFjdC1uYXRpdmV8QHJlYWN0LW5hdGl2ZSgtY29tbXVuaXR5KT98ZXhwbyhuZW50KT98QGV4cG8obmVudCk/XC8uKnxAZXhwby1nb29nbGUtZm9udHNcLy4qfHJlYWN0LW5hdmlnYXRpb258QHJlYWN0LW5hdmlnYXRpb25cLy4qfEB1bmltb2R1bGVzXC8uKnx1bmltb2R1bGVzfHNlbnRyeS1leHBvfG5hdGl2ZS1iYXNlfEBzZW50cnlcLy4qfHJlYWN0LW5hdGl2ZS1zdmd8cmVhY3QtbmF0aXZlLXJlYW5pbWF0ZWR8cmVhY3QtbmF0aXZlLXdvcmtsZXRzfHJlYWN0LW5hdGl2ZS1zY3JlZW5zfHJlYWN0LW5hdGl2ZS1nZXN0dXJlLWhhbmRsZXJ8cmVhY3QtbmF0aXZlLXNhZmUtYXJlYS1jb250ZXh0fHJlYWN0LW5hdGl2ZS1rZXlib2FyZC1jb250cm9sbGVyKVwvKS8sCl07Cgptb2R1bGUuZXhwb3J0cyA9IGNvbmZpZzsK' \
+            | base64 -D > flashlight-strobe-github/flashlight-strobe/metro.config.js
+          grep -q 'pnpm' flashlight-strobe-github/flashlight-strobe/metro.config.js \
+            && echo "metro.config.js written OK" \
+            || { echo "ERROR: metro.config.js decode failed"; exit 1; }
 
-          echo "Decoding keystore..."
-          echo "$CM_KEYSTORE" | base64 --decode > "$ANDROID_DIR/app/release.keystore"
-
+      - name: Configure Android
+        script: |
+          set -e
+          ANDROID_DIR=flashlight-strobe-github/flashlight-strobe/android
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > "$ANDROID_DIR/local.properties"
+          echo "$CM_KEYSTORE" | base64 -D > "$ANDROID_DIR/app/release.keystore"
           cat >> "$ANDROID_DIR/gradle.properties" << PROPS
           MYAPP_RELEASE_STORE_FILE=release.keystore
           MYAPP_RELEASE_KEY_ALIAS=${CM_KEY_ALIAS}
           MYAPP_RELEASE_STORE_PASSWORD=${CM_KEYSTORE_PASSWORD}
           MYAPP_RELEASE_KEY_PASSWORD=${CM_KEY_PASSWORD}
           PROPS
-
           node -e "
-            const fs = require('fs');
-            const file = '$ANDROID_DIR/app/build.gradle';
-            let src = fs.readFileSync(file, 'utf8');
+            var fs = require('fs');
+            var file = '$ANDROID_DIR/app/build.gradle';
+            var src = fs.readFileSync(file, 'utf8');
             if (!src.includes('MYAPP_RELEASE_STORE_FILE')) {
-              src = src.replace(
-                /signingConfigs\s*\{/,
-                'signingConfigs {\n        release {\n            storeFile file(MYAPP_RELEASE_STORE_FILE)\n            storePassword MYAPP_RELEASE_STORE_PASSWORD\n            keyAlias MYAPP_RELEASE_KEY_ALIAS\n            keyPassword MYAPP_RELEASE_KEY_PASSWORD\n        }'
-              );
+              src = src.replace(/signingConfigs\s*\{/, 'signingConfigs {\n        release {\n            storeFile file(MYAPP_RELEASE_STORE_FILE)\n            storePassword MYAPP_RELEASE_STORE_PASSWORD\n            keyAlias MYAPP_RELEASE_KEY_ALIAS\n            keyPassword MYAPP_RELEASE_KEY_PASSWORD\n        }');
             }
             src = src.replace(/signingConfig signingConfigs\.debug/g, 'signingConfig signingConfigs.release');
             fs.writeFileSync(file, src);
-            console.log('build.gradle patched.');
           "
 
-      # ── 6. Build ───────────────────────────────────────────────────────────
       - name: Build release APK
         script: |
           set -e
-          export NODE_ENV=production
           cd flashlight-strobe-github/flashlight-strobe/android
           chmod +x ./gradlew
           ./gradlew assembleRelease --no-daemon
@@ -191,37 +106,20 @@ workflows:
 
     publishing:
       scripts:
-        - name: Upload APK to Supabase
+        - name: Upload to Supabase
           script: |
             set -e
-
-            if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_KEY" ] || [ -z "$SUPABASE_BUCKET" ]; then
-              echo "Supabase vars not set — skipping upload."
-              exit 0
-            fi
-
-            APK=$(find . -path "*/app/build/outputs/apk/**/*.apk" 2>/dev/null | head -1)
-            if [ -z "$APK" ]; then echo "No APK found!"; exit 1; fi
-
-            APP_JSON="flashlight-strobe-github/flashlight-strobe/app.json"
-            VERSION=$(node -e "console.log(require('./$APP_JSON').expo.version)")
+            APK=$(find . -path "*/app/build/outputs/apk/**/*.apk" | head -1)
+            [ -z "$APK" ] && { echo "No APK found"; exit 1; }
+            VERSION=$(node -e "console.log(require('./flashlight-strobe-github/flashlight-strobe/app.json').expo.version)")
             TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-            VERSIONED="flashlight-strobe-v${VERSION}-${TIMESTAMP}.apk"
-            LATEST="flashlight-strobe-latest.apk"
-
-            upload() {
-              HTTP=$(curl -fsSL -o /dev/null -w "%{http_code}" \
-                -X POST \
-                "${SUPABASE_URL}/storage/v1/object/${SUPABASE_BUCKET}/$1?upsert=true" \
+            for NAME in "flashlight-strobe-v${VERSION}-${TIMESTAMP}.apk" "flashlight-strobe-latest.apk"; do
+              HTTP=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+                "${SUPABASE_URL}/storage/v1/object/${SUPABASE_BUCKET}/${NAME}?upsert=true" \
                 -H "Authorization: Bearer ${SUPABASE_KEY}" \
                 -H "Content-Type: application/octet-stream" \
                 -H "x-upsert: true" \
-                --data-binary @"${APK}")
-              echo "$1 -> HTTP $HTTP"
+                --data-binary @"$APK")
+              echo "$NAME -> HTTP $HTTP"
               [ "$HTTP" -ge 200 ] && [ "$HTTP" -lt 300 ] || exit 1
-            }
-
-            upload "$VERSIONED"
-            upload "$LATEST"
-
-            echo "APK: ${SUPABASE_URL}/storage/v1/object/public/${SUPABASE_BUCKET}/${LATEST}"
+            done
