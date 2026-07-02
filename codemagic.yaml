@@ -114,15 +114,15 @@ workflows:
           echo "=== Native Bundle compilation completed successfully ==="
           echo "=== Launching Gradle distribution compilation (Skipping broken bundle sub-task) ==="
           
-          # DYNAMIC FIX: Traverse and locate the absolute path where gradlew exists
-          GRADLEW_PATH=$(find . -maxdepth 4 -name "gradlew" -type f 2>/dev/null | head -1)
+          # EXPLICIT FIX: Isolate search to explicitly exclude node_modules paths entirely
+          GRADLEW_PATH=$(find "$APP_ABS" -maxdepth 3 -name "gradlew" -not -path "*/node_modules/*" -type f 2>/dev/null | head -1)
           if [ -z "$GRADLEW_PATH" ]; then
-            # Scan upwards/broadly if not found locally
-            GRADLEW_PATH=$(find "$WORKSPACE_ABS" -name "gradlew" -type f 2>/dev/null | head -1)
+            # Direct static fallback strategy matching expected workspace structures
+            GRADLEW_PATH="$APP_ABS/android/gradlew"
           fi
           
           GRADLE_DIR=$(dirname "$GRADLEW_PATH")
-          echo "Located Gradle workspace execution root at: $GRADLE_DIR"
+          echo "Located real native Android project root at: $GRADLE_DIR"
           
           cd "$GRADLE_DIR"
           chmod +x ./gradlew
