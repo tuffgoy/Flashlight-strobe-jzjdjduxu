@@ -39,6 +39,10 @@ workflows:
         script: |
           set -e
 
+          # Capture repo root BEFORE any cd — used for absolute paths later.
+          REPO_ROOT=$(pwd)
+          APP_NM="$REPO_ROOT/flashlight-strobe-github/flashlight-strobe/node_modules"
+
           # The pnpm workspace root — this is where pnpm-workspace.yaml lives.
           cd flashlight-strobe-github
 
@@ -64,12 +68,11 @@ workflows:
           # modules by walking up from the file's directory, so
           # flashlight-strobe/node_modules/babel-preset-expo/ is found first.
           echo "Installing babel-preset-expo via temp dir (avoids catalog: protocol)..."
-          REPO_ROOT=$(pwd)
-          APP_NM="$REPO_ROOT/flashlight-strobe-github/flashlight-strobe/node_modules"
           mkdir -p /tmp/bpe-install
           cd /tmp/bpe-install
           npm init -y > /dev/null 2>&1
           npm install babel-preset-expo --legacy-peer-deps --no-package-lock
+          mkdir -p "$APP_NM"
           cp -r /tmp/bpe-install/node_modules/babel-preset-expo "$APP_NM/"
           echo "Installed — $APP_NM/babel-preset-expo"
           cd "$REPO_ROOT"
