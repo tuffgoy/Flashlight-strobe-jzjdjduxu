@@ -35,25 +35,46 @@ workflows:
       # IMPORTANT: The repo root has a separate package.json that is NOT the
       # Expo project. The actual pnpm workspace lives in flashlight-strobe-github/.
       # We must cd there before running any pnpm commands.
-      # ── 2. JS dependencies ─────────────────────────────────────────────────
       - name: Install JS dependencies
         script: |
           set -e
 
-          # The pnpm workspace root
+          # The pnpm workspace root — this is where pnpm-workspace.yaml lives.
           cd flashlight-strobe-github
 
-          # Install everything in the workspace
+          # Install everything in the workspace (flashlight-strobe member + root deps).
+          # --shamefully-hoist puts all packages flat in node_modules so tools
+          # that do upward require() resolution can find them.
           pnpm install --no-frozen-lockfile --shamefully-hoist
 
           # ── babel-preset-expo fix ──────────────────────────────────────────
-          # We force pnpm to inject babel-preset-expo directly into the app sub-project,
-          # bypassing workspace catalog restrictions without breaking package.json.
-          echo "Installing babel-preset-expo directly to the app package..."
-          cd flashlight-strobe
-          pnpm add babel-preset-expo --save-dev --unbundle --ignore-workspace
+          # babel.config.js requires babel-preset-expo, but it is NOT listed
+          # in the app's package.json devDependencies. pnpm's module isolation
+          # means it lives only inside the .pnpm virtual store, unreachable by
+          # Babel when Metro's jest-worker spawns node subprocesses during
+          # createBundleReleaseJsAndAssets.
+          #
+          # We cannot run `npm install` inside the app directory because its
+          # package.json uses pnpm catalog: references (e.g. "react": "catalog:")
+          # that npm does not understand — it throws EUNSUPPORTEDPROTOCOL.
+          #
+          # Solution: install babel-preset-expo in a clean temp directory that
+          # has no package.json with catalog: entries, then copy the resulting
+          # package folder into the app's own node_modules. Node/Metro resolves
+          # modules by walking up from the file's directory, so
+          # flashlight-strobe/node_modules/babel-preset-expo/ is found first.
+          echo "Installing babel-preset-expo via temp dir (avoids catalog: protocol)..."
+          REPO_ROOT=$(pwd)
+          APP_NM="$REPO_ROOT/flashlight-strobe-github/flashlight-strobe/node_modules"
+          mkdir -p /tmp/bpe-install
+          cd /tmp/bpe-install
+          npm init -y > /dev/null 2>&1
+          npm install babel-preset-expo --legacy-peer-deps --no-package-lock
+          cp -r /tmp/bpe-install/node_modules/babel-preset-expo "$APP_NM/"
+          echo "Installed — $APP_NM/babel-preset-expo"
+          cd "$REPO_ROOT"
 
-
+      # ── 3. Generate native Android project ─────────────────────────────────
       - name: Expo prebuild
         script: |
           set -e
