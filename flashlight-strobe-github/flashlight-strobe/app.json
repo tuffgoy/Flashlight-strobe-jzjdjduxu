@@ -2,7 +2,7 @@
   "expo": {
     "name": "Flashlight Strobe",
     "slug": "flashlight-strobe",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "flashlight-strobe",
@@ -15,21 +15,15 @@
     },
     "ios": {
       "supportsTablet": false,
-      "bundleIdentifier": "com.strobeflash.app",
       "infoPlist": {
-        "NSCameraUsageDescription": "Flashlight Strobe uses the camera permission to access your device's rear torch LED for strobe and flash effects. No images or video are captured or stored."
+        "NSCameraUsageDescription": "Flashlight Strobe uses the camera permission to access your device's rear torch LED for strobe effects. No images or video are captured."
       }
     },
     "android": {
-      "package": "com.strobeflash.app",
-      "adaptiveIcon": {
-        "foregroundImage": "./assets/images/icon.png",
-        "backgroundColor": "#080808"
-      },
-      "permissions": [
-        "android.permission.CAMERA",
-        "android.permission.FLASHLIGHT"
-      ]
+      "package": "com.flashlightstrobe.app",
+      "permissions": ["android.permission.CAMERA", "android.permission.FLASHLIGHT"],
+      "enableProguardInReleaseBuilds": true,
+      "enableShrinkResourcesInReleaseBuilds": true
     },
     "web": {
       "favicon": "./assets/images/icon.png"
@@ -43,12 +37,7 @@
       ],
       "expo-font",
       "expo-web-browser",
-      [
-        "expo-camera",
-        {
-          "cameraPermission": "Flashlight Strobe needs camera access to control the torch LED. No photos or video are taken."
-        }
-      ]
+      "expo-camera"
     ],
     "experiments": {
       "typedRoutes": true,
