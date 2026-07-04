@@ -5,21 +5,16 @@
  *   - TorchCamera is an isolated forwardRef component (0×0, invisible).
  *     Only IT re-renders on each torch toggle via torchRef.current?.setTorch().
  *     The parent StrobeScreen never re-renders at strobe frequency.
+ *   - Permission is managed here (single source) and passed to TorchCamera as a
+ *     prop — no dual hook instances.
  *   - Drift-corrected high-res timer: polls every 2 ms using performance.now()
- *     so the actual toggle instant is accurate regardless of JS event-loop jitter.
- *   - Max Hz raised to 120. Practical hardware limit depends on the device,
- *     but the JS side no longer bottlenecks it.
+ *     with a catch-up while-loop so JS stalls don't cause cumulative drift.
+ *   - Max Hz raised to 120.
  */
 
 import { useCameraPermissions } from "expo-camera";
 import * as Haptics from "expo-haptics";
-import React, {
-  useCallback,
-  useEffect,
-  useImperativeHandle,
-  useRef,
-  useState,
-} from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   Animated,
   Platform,
@@ -55,20 +50,29 @@ function hzLabel(hz: number): string {
 export default function StrobeScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
+  // Single source of truth for camera permission — passed as prop to TorchCamera
   const [permission, requestPermission] = useCameraPermissions();
 
   const [isActive, setIsActive] = useState(false);
   const [hz, setHz] = useState(10);
   const [dutyCycle, setDutyCycle] = useState(50);
 
-  // Refs for strobe engine (no state changes = no parent re-renders during strobe)
+  // Refs: no state changes during strobe = no parent re-renders
   const torchRef = useRef<TorchCameraHandle>(null);
   const flashAnim = useRef(new Animated.Value(0)).current;
   const glowAnim = useRef(new Animated.Value(0)).current;
 
+  // ── Camera permission: request on mount (non-blocking) ─────────────────────
+  useEffect(() => {
+    if (!permission?.granted && permission?.canAskAgain !== false) {
+      requestPermission().catch(() => {});
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // ── Strobe engine ──────────────────────────────────────────────────────────
-  // Uses a 2 ms polling interval + performance.now() for drift correction.
-  // At 120 Hz the half-period is ~4.17 ms; 2 ms polling gives sub-ms accuracy.
+  // 2 ms polling + performance.now() + catch-up while-loop for accuracy.
+  // Only torchRef.current?.setTorch() is called — no React state → no re-renders.
   useEffect(() => {
     if (!isActive) {
       torchRef.current?.setTorch(false);
@@ -93,22 +97,24 @@ export default function StrobeScreen() {
     const onMs = period * (dutyCycle / 100);
     const offMs = period - onMs;
 
-    let state = true;
+    let torchState = true;
     let nextToggle = performance.now() + onMs;
 
-    // Turn torch on immediately
+    // Start with torch ON immediately
     torchRef.current?.setTorch(true);
     if (Platform.OS === "web") flashAnim.setValue(1);
 
     const id = setInterval(() => {
       const now = performance.now();
-      if (now >= nextToggle) {
-        state = !state;
-        torchRef.current?.setTorch(state);
-        if (Platform.OS === "web") flashAnim.setValue(state ? 1 : 0);
-        // Schedule next toggle relative to the *intended* time, not now,
-        // so errors don't accumulate.
-        nextToggle += state ? onMs : offMs;
+      // Catch-up loop: if JS stalled past multiple edges, process all of them
+      // (guard of 20 iterations prevents runaway in extreme stall scenarios)
+      let catchUp = 0;
+      while (now >= nextToggle && catchUp < 20) {
+        torchState = !torchState;
+        torchRef.current?.setTorch(torchState);
+        if (Platform.OS === "web") flashAnim.setValue(torchState ? 1 : 0);
+        nextToggle += torchState ? onMs : offMs;
+        catchUp++;
       }
     }, 2);
 
@@ -119,26 +125,16 @@ export default function StrobeScreen() {
     };
   }, [isActive, hz, dutyCycle, glowAnim, flashAnim]);
 
-  // ── Permission: request on mount (non-blocking) ────────────────────────────
-  useEffect(() => {
-    if (!permission?.granted && permission?.canAskAgain !== false) {
-      requestPermission().catch(() => {});
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
   const handleToggle = async () => {
     await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
     setIsActive((prev) => !prev);
   };
 
-  const adjustHz = (delta: number) => {
+  const adjustHz = (delta: number) =>
     setHz((prev) => clamp(parseFloat((prev + delta).toFixed(1)), MIN_HZ, MAX_HZ));
-  };
 
-  const adjustDuty = (delta: number) => {
+  const adjustDuty = (delta: number) =>
     setDutyCycle((prev) => clamp(prev + delta, MIN_DUTY, MAX_DUTY));
-  };
 
   const glowOpacity = glowAnim.interpolate({
     inputRange: [0, 1],
@@ -149,7 +145,7 @@ export default function StrobeScreen() {
 
   return (
     <View style={styles.root}>
-      {/* ── Web: full-screen flash overlay (no real torch on web) ── */}
+      {/* Web: full-screen flash overlay (no real torch on web) */}
       {Platform.OS === "web" && (
         <Animated.View
           pointerEvents="none"
@@ -157,14 +153,13 @@ export default function StrobeScreen() {
         />
       )}
 
-      {/* ── Native: 0×0 invisible camera for torch control ── */}
-      <TorchCamera ref={torchRef} />
+      {/* Native: 0×0 invisible camera for torch control */}
+      <TorchCamera ref={torchRef} permissionGranted={permission?.granted ?? false} />
 
       <ScrollView
         contentContainerStyle={styles.scroll}
         showsVerticalScrollIndicator={false}
       >
-        {/* Title */}
         <Text style={styles.titleLabel}>STROBE</Text>
 
         {/* Main toggle button */}
@@ -199,7 +194,6 @@ export default function StrobeScreen() {
             />
           </View>
 
-          {/* Fine adjustment row */}
           <View style={styles.adjRow}>
             {[-10, -5, -1].map((d) => (
               <Pressable key={d} style={styles.adjBtn} onPress={() => adjustHz(d)}>
@@ -261,7 +255,6 @@ export default function StrobeScreen() {
             ))}
           </View>
 
-          {/* Duty presets */}
           <View style={styles.presetRow}>
             {[10, 25, 50, 75, 90].map((v) => (
               <Pressable
@@ -269,7 +262,9 @@ export default function StrobeScreen() {
                 style={[styles.presetBtn, dutyCycle === v && styles.presetBtnActive]}
                 onPress={() => setDutyCycle(v)}
               >
-                <Text style={[styles.presetText, dutyCycle === v && styles.presetTextActive]}>
+                <Text
+                  style={[styles.presetText, dutyCycle === v && styles.presetTextActive]}
+                >
                   {v}%
                 </Text>
               </Pressable>
@@ -277,7 +272,7 @@ export default function StrobeScreen() {
           </View>
         </View>
 
-        {/* Status */}
+        {/* Status row */}
         <View style={styles.statusRow}>
           <View style={styles.statItem}>
             <Text style={styles.statValue}>{hz.toFixed(1)}</Text>
@@ -295,12 +290,14 @@ export default function StrobeScreen() {
           </View>
           <View style={styles.statDivider} />
           <View style={styles.statItem}>
-            <Text style={styles.statValue}>{((1000 / hz) * (dutyCycle / 100)).toFixed(0)}</Text>
+            <Text style={styles.statValue}>
+              {((1000 / hz) * (dutyCycle / 100)).toFixed(0)}
+            </Text>
             <Text style={styles.statLabel}>ms ON</Text>
           </View>
         </View>
 
-        {/* Camera permission hint (non-blocking) */}
+        {/* Camera permission button (non-blocking, shown only if denied) */}
         {Platform.OS !== "web" && !permission?.granted && (
           <Pressable style={styles.permBtn} onPress={() => requestPermission()}>
             <Text style={styles.permBtnText}>
@@ -323,7 +320,6 @@ function makeStyles(
       ...StyleSheet.absoluteFillObject,
       backgroundColor: "#ffffff",
       zIndex: 10,
-      pointerEvents: "none",
     },
     scroll: {
       paddingHorizontal: 16,
@@ -414,10 +410,7 @@ function makeStyles(
       backgroundColor: colors.primary,
       borderRadius: 2,
     },
-    adjRow: {
-      flexDirection: "row",
-      gap: 6,
-    },
+    adjRow: { flexDirection: "row", gap: 6 },
     adjBtn: {
       paddingHorizontal: 10,
       paddingVertical: 8,
@@ -433,11 +426,7 @@ function makeStyles(
       fontFamily: "Inter_600SemiBold",
       color: colors.foreground,
     },
-    presetRow: {
-      flexDirection: "row",
-      flexWrap: "wrap",
-      gap: 6,
-    },
+    presetRow: { flexDirection: "row", flexWrap: "wrap", gap: 6 },
     presetBtn: {
       paddingHorizontal: 12,
       paddingVertical: 6,

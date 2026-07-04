@@ -1,12 +1,12 @@
 /**
  * Patterns screen — predefined strobe sequences (SOS, Police, Heartbeat, etc.)
  *
- * Performance: uses TorchCamera forwardRef component so only the 0×0 hidden
- * camera re-renders on each torch step, not the full PatternsScreen.
+ * Performance: TorchCamera forwardRef component with permissionGranted prop
+ * (single source of truth). Only TorchCamera re-renders on each torch step.
  */
 
-import * as Haptics from "expo-haptics";
 import { useCameraPermissions } from "expo-camera";
+import * as Haptics from "expo-haptics";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   Animated,
@@ -129,7 +129,7 @@ const PATTERNS: Pattern[] = [
     ],
   },
   {
-    id: "strobe_club",
+    id: "club_strobe",
     name: "Club Strobe",
     description: "Classic club strobe at ~10Hz",
     color: "#8b5cf6",
@@ -142,12 +142,12 @@ const PATTERNS: Pattern[] = [
 export default function PatternsScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
+  // Single source of truth for permission — passed as prop to TorchCamera
   const [permission, requestPermission] = useCameraPermissions();
   const [activeId, setActiveId] = useState<string | null>(null);
 
   const torchRef = useRef<TorchCameraHandle>(null);
   const flashAnim = useRef(new Animated.Value(0)).current;
-  const seqRef = useRef<{ pattern: Pattern; idx: number } | null>(null);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Request permission on mount (non-blocking)
@@ -167,10 +167,9 @@ export default function PatternsScreen() {
 
   const runSequence = useCallback(
     (pattern: Pattern, idx: number) => {
-      seqRef.current = { pattern, idx };
       const step = pattern.sequence[idx];
 
-      // Only the TorchCamera component re-renders on setTorch — not PatternsScreen
+      // Only TorchCamera re-renders — PatternsScreen does not
       torchRef.current?.setTorch(step.on);
 
       if (Platform.OS === "web") {
@@ -234,8 +233,11 @@ export default function PatternsScreen() {
         />
       )}
 
-      {/* Invisible 0×0 camera for torch control */}
-      <TorchCamera ref={torchRef} />
+      {/* Invisible 0×0 camera — single source of permission truth via prop */}
+      <TorchCamera
+        ref={torchRef}
+        permissionGranted={permission?.granted ?? false}
+      />
 
       <ScrollView
         contentContainerStyle={styles.scroll}
@@ -277,7 +279,7 @@ export default function PatternsScreen() {
           })}
         </View>
 
-        {/* Camera permission hint */}
+        {/* Camera permission button */}
         {Platform.OS !== "web" && !permission?.granted && (
           <Pressable style={styles.permBtn} onPress={() => requestPermission()}>
             <Text style={styles.permBtnText}>Grant Camera Permission for Torch</Text>
@@ -294,10 +296,7 @@ function makeStyles(
 ) {
   return StyleSheet.create({
     root: { flex: 1, backgroundColor: colors.background },
-    flashOverlay: {
-      ...StyleSheet.absoluteFillObject,
-      zIndex: 10,
-    },
+    flashOverlay: { ...StyleSheet.absoluteFillObject, zIndex: 10 },
     scroll: {
       paddingHorizontal: 16,
       paddingTop: insets.top + 16,
