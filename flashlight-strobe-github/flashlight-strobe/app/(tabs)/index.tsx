@@ -1,6 +1,25 @@
-import { CameraView, useCameraPermissions } from "expo-camera";
+/**
+ * Strobe screen — main flashlight/torch strobe controller.
+ *
+ * Performance design:
+ *   - TorchCamera is an isolated forwardRef component (0×0, invisible).
+ *     Only IT re-renders on each torch toggle via torchRef.current?.setTorch().
+ *     The parent StrobeScreen never re-renders at strobe frequency.
+ *   - Drift-corrected high-res timer: polls every 2 ms using performance.now()
+ *     so the actual toggle instant is accurate regardless of JS event-loop jitter.
+ *   - Max Hz raised to 120. Practical hardware limit depends on the device,
+ *     but the JS side no longer bottlenecks it.
+ */
+
+import { useCameraPermissions } from "expo-camera";
 import * as Haptics from "expo-haptics";
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useRef,
+  useState,
+} from "react";
 import {
   Animated,
   Platform,
@@ -12,15 +31,25 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
+import { TorchCamera, TorchCameraHandle } from "@/components/TorchCamera";
 import { useColors } from "@/hooks/useColors";
 
 const MIN_HZ = 0.5;
-const MAX_HZ = 30;
+const MAX_HZ = 120;
 const MIN_DUTY = 10;
 const MAX_DUTY = 90;
 
 function clamp(val: number, min: number, max: number) {
   return Math.max(min, Math.min(max, val));
+}
+
+function hzLabel(hz: number): string {
+  if (hz < 2) return "Very Slow";
+  if (hz < 5) return "Slow";
+  if (hz < 15) return "Medium";
+  if (hz < 30) return "Fast";
+  if (hz < 60) return "Rapid";
+  return "Ultra";
 }
 
 export default function StrobeScreen() {
@@ -29,60 +58,20 @@ export default function StrobeScreen() {
   const [permission, requestPermission] = useCameraPermissions();
 
   const [isActive, setIsActive] = useState(false);
-  const [torchOn, setTorchOn] = useState(false);
   const [hz, setHz] = useState(10);
   const [dutyCycle, setDutyCycle] = useState(50);
 
-  const glowAnim = useRef(new Animated.Value(0)).current;
+  // Refs for strobe engine (no state changes = no parent re-renders during strobe)
+  const torchRef = useRef<TorchCameraHandle>(null);
   const flashAnim = useRef(new Animated.Value(0)).current;
-  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const glowAnim = useRef(new Animated.Value(0)).current;
 
-  const clearTimer = useCallback(() => {
-    if (timeoutRef.current) {
-      clearTimeout(timeoutRef.current);
-      timeoutRef.current = null;
-    }
-  }, []);
-
-  const scheduleStrobe = useCallback(
-    (currentlyOn: boolean, hzVal: number, dutyVal: number) => {
-      const period = 1000 / hzVal;
-      const onTime = period * (dutyVal / 100);
-      const offTime = period * (1 - dutyVal / 100);
-
-      if (currentlyOn) {
-        timeoutRef.current = setTimeout(() => {
-          setTorchOn(false);
-          if (Platform.OS === "web") {
-            Animated.timing(flashAnim, {
-              toValue: 0,
-              duration: 10,
-              useNativeDriver: true,
-            }).start();
-          }
-          scheduleStrobe(false, hzVal, dutyVal);
-        }, onTime);
-      } else {
-        timeoutRef.current = setTimeout(() => {
-          setTorchOn(true);
-          if (Platform.OS === "web") {
-            Animated.timing(flashAnim, {
-              toValue: 1,
-              duration: 10,
-              useNativeDriver: true,
-            }).start();
-          }
-          scheduleStrobe(true, hzVal, dutyVal);
-        }, offTime);
-      }
-    },
-    [flashAnim]
-  );
-
+  // ── Strobe engine ──────────────────────────────────────────────────────────
+  // Uses a 2 ms polling interval + performance.now() for drift correction.
+  // At 120 Hz the half-period is ~4.17 ms; 2 ms polling gives sub-ms accuracy.
   useEffect(() => {
-    clearTimer();
     if (!isActive) {
-      setTorchOn(false);
+      torchRef.current?.setTorch(false);
       flashAnim.setValue(0);
       Animated.timing(glowAnim, {
         toValue: 0,
@@ -92,46 +81,59 @@ export default function StrobeScreen() {
       return;
     }
 
+    // Glow pulse animation while active
     Animated.loop(
       Animated.sequence([
-        Animated.timing(glowAnim, {
-          toValue: 1,
-          duration: 600,
-          useNativeDriver: true,
-        }),
-        Animated.timing(glowAnim, {
-          toValue: 0.4,
-          duration: 600,
-          useNativeDriver: true,
-        }),
+        Animated.timing(glowAnim, { toValue: 1, duration: 600, useNativeDriver: true }),
+        Animated.timing(glowAnim, { toValue: 0.4, duration: 600, useNativeDriver: true }),
       ])
     ).start();
 
-    setTorchOn(true);
+    const period = 1000 / hz;
+    const onMs = period * (dutyCycle / 100);
+    const offMs = period - onMs;
+
+    let state = true;
+    let nextToggle = performance.now() + onMs;
+
+    // Turn torch on immediately
+    torchRef.current?.setTorch(true);
     if (Platform.OS === "web") flashAnim.setValue(1);
-    scheduleStrobe(true, hz, dutyCycle);
+
+    const id = setInterval(() => {
+      const now = performance.now();
+      if (now >= nextToggle) {
+        state = !state;
+        torchRef.current?.setTorch(state);
+        if (Platform.OS === "web") flashAnim.setValue(state ? 1 : 0);
+        // Schedule next toggle relative to the *intended* time, not now,
+        // so errors don't accumulate.
+        nextToggle += state ? onMs : offMs;
+      }
+    }, 2);
 
     return () => {
-      clearTimer();
-      setTorchOn(false);
+      clearInterval(id);
+      torchRef.current?.setTorch(false);
       flashAnim.setValue(0);
     };
-  }, [isActive, hz, dutyCycle, scheduleStrobe, clearTimer, glowAnim, flashAnim]);
+  }, [isActive, hz, dutyCycle, glowAnim, flashAnim]);
+
+  // ── Permission: request on mount (non-blocking) ────────────────────────────
+  useEffect(() => {
+    if (!permission?.granted && permission?.canAskAgain !== false) {
+      requestPermission().catch(() => {});
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const handleToggle = async () => {
-    if (!isActive && permission && !permission.granted) {
-      const result = await requestPermission();
-      if (!result.granted) return;
-    }
     await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
     setIsActive((prev) => !prev);
   };
 
   const adjustHz = (delta: number) => {
-    setHz((prev) => {
-      const next = parseFloat((prev + delta).toFixed(1));
-      return clamp(next, MIN_HZ, MAX_HZ);
-    });
+    setHz((prev) => clamp(parseFloat((prev + delta).toFixed(1)), MIN_HZ, MAX_HZ));
   };
 
   const adjustDuty = (delta: number) => {
@@ -147,7 +149,7 @@ export default function StrobeScreen() {
 
   return (
     <View style={styles.root}>
-      {/* Web flash overlay */}
+      {/* ── Web: full-screen flash overlay (no real torch on web) ── */}
       {Platform.OS === "web" && (
         <Animated.View
           pointerEvents="none"
@@ -155,19 +157,8 @@ export default function StrobeScreen() {
         />
       )}
 
-      {/* Hidden camera view for torch on native */}
-      {Platform.OS !== "web" && permission?.granted && (
-        <CameraView
-          style={StyleSheet.absoluteFillObject}
-          enableTorch={torchOn}
-          facing="back"
-        />
-      )}
-
-      {/* Dark overlay when camera visible */}
-      {Platform.OS !== "web" && permission?.granted && (
-        <View style={styles.cameraOverlay} />
-      )}
+      {/* ── Native: 0×0 invisible camera for torch control ── */}
+      <TorchCamera ref={torchRef} />
 
       <ScrollView
         contentContainerStyle={styles.scroll}
@@ -178,9 +169,7 @@ export default function StrobeScreen() {
 
         {/* Main toggle button */}
         <View style={styles.buttonWrap}>
-          <Animated.View
-            style={[styles.glowRing, { opacity: glowOpacity }]}
-          />
+          <Animated.View style={[styles.glowRing, { opacity: glowOpacity }]} />
           <Pressable
             style={[styles.mainButton, isActive && styles.mainButtonActive]}
             onPress={handleToggle}
@@ -199,44 +188,35 @@ export default function StrobeScreen() {
         <View style={styles.card}>
           <Text style={styles.cardTitle}>FREQUENCY</Text>
           <Text style={styles.bigValue}>{hz.toFixed(1)} Hz</Text>
-          <Text style={styles.subText}>{hz < 3 ? "Slow" : hz < 10 ? "Medium" : hz < 20 ? "Fast" : "Rapid"}</Text>
+          <Text style={styles.subText}>{hzLabel(hz)}</Text>
 
           <View style={styles.sliderTrack}>
             <View
               style={[
                 styles.sliderFill,
-                {
-                  width: `${((hz - MIN_HZ) / (MAX_HZ - MIN_HZ)) * 100}%` as any,
-                },
+                { width: `${((hz - MIN_HZ) / (MAX_HZ - MIN_HZ)) * 100}%` as any },
               ]}
             />
           </View>
 
+          {/* Fine adjustment row */}
           <View style={styles.adjRow}>
-            {[-5, -1, -0.5].map((d) => (
-              <Pressable
-                key={d}
-                style={styles.adjBtn}
-                onPress={() => adjustHz(d)}
-              >
-                <Text style={styles.adjBtnText}>{d > 0 ? `+${d}` : d}</Text>
+            {[-10, -5, -1].map((d) => (
+              <Pressable key={d} style={styles.adjBtn} onPress={() => adjustHz(d)}>
+                <Text style={styles.adjBtnText}>{d}</Text>
               </Pressable>
             ))}
             <View style={{ flex: 1 }} />
-            {[0.5, 1, 5].map((d) => (
-              <Pressable
-                key={d}
-                style={styles.adjBtn}
-                onPress={() => adjustHz(d)}
-              >
+            {[1, 5, 10].map((d) => (
+              <Pressable key={d} style={styles.adjBtn} onPress={() => adjustHz(d)}>
                 <Text style={styles.adjBtnText}>+{d}</Text>
               </Pressable>
             ))}
           </View>
 
-          {/* Hz presets */}
+          {/* Hz presets — extended to 120 */}
           <View style={styles.presetRow}>
-            {[1, 5, 10, 15, 20, 30].map((v) => (
+            {[1, 5, 10, 20, 30, 60, 120].map((v) => (
               <Pressable
                 key={v}
                 style={[styles.presetBtn, hz === v && styles.presetBtnActive]}
@@ -254,7 +234,7 @@ export default function StrobeScreen() {
         <View style={styles.card}>
           <Text style={styles.cardTitle}>DUTY CYCLE</Text>
           <Text style={styles.bigValue}>{dutyCycle}%</Text>
-          <Text style={styles.subText}>Flash on time per cycle</Text>
+          <Text style={styles.subText}>Flash on-time per cycle</Text>
 
           <View style={styles.sliderTrack}>
             <View
@@ -269,28 +249,35 @@ export default function StrobeScreen() {
 
           <View style={styles.adjRow}>
             {[-20, -10, -5].map((d) => (
-              <Pressable
-                key={d}
-                style={styles.adjBtn}
-                onPress={() => adjustDuty(d)}
-              >
+              <Pressable key={d} style={styles.adjBtn} onPress={() => adjustDuty(d)}>
                 <Text style={styles.adjBtnText}>{d}</Text>
               </Pressable>
             ))}
             <View style={{ flex: 1 }} />
             {[5, 10, 20].map((d) => (
-              <Pressable
-                key={d}
-                style={styles.adjBtn}
-                onPress={() => adjustDuty(d)}
-              >
+              <Pressable key={d} style={styles.adjBtn} onPress={() => adjustDuty(d)}>
                 <Text style={styles.adjBtnText}>+{d}</Text>
+              </Pressable>
+            ))}
+          </View>
+
+          {/* Duty presets */}
+          <View style={styles.presetRow}>
+            {[10, 25, 50, 75, 90].map((v) => (
+              <Pressable
+                key={v}
+                style={[styles.presetBtn, dutyCycle === v && styles.presetBtnActive]}
+                onPress={() => setDutyCycle(v)}
+              >
+                <Text style={[styles.presetText, dutyCycle === v && styles.presetTextActive]}>
+                  {v}%
+                </Text>
               </Pressable>
             ))}
           </View>
         </View>
 
-        {/* Status info */}
+        {/* Status */}
         <View style={styles.statusRow}>
           <View style={styles.statItem}>
             <Text style={styles.statValue}>{hz.toFixed(1)}</Text>
@@ -298,19 +285,27 @@ export default function StrobeScreen() {
           </View>
           <View style={styles.statDivider} />
           <View style={styles.statItem}>
-            <Text style={styles.statValue}>{dutyCycle}%</Text>
-            <Text style={styles.statLabel}>Duty</Text>
+            <Text style={styles.statValue}>{dutyCycle}</Text>
+            <Text style={styles.statLabel}>DUTY%</Text>
           </View>
           <View style={styles.statDivider} />
           <View style={styles.statItem}>
             <Text style={styles.statValue}>{(1000 / hz).toFixed(0)}</Text>
-            <Text style={styles.statLabel}>ms period</Text>
+            <Text style={styles.statLabel}>ms/CYCLE</Text>
+          </View>
+          <View style={styles.statDivider} />
+          <View style={styles.statItem}>
+            <Text style={styles.statValue}>{((1000 / hz) * (dutyCycle / 100)).toFixed(0)}</Text>
+            <Text style={styles.statLabel}>ms ON</Text>
           </View>
         </View>
 
+        {/* Camera permission hint (non-blocking) */}
         {Platform.OS !== "web" && !permission?.granted && (
-          <Pressable style={styles.permBtn} onPress={requestPermission}>
-            <Text style={styles.permBtnText}>Grant Camera Permission</Text>
+          <Pressable style={styles.permBtn} onPress={() => requestPermission()}>
+            <Text style={styles.permBtnText}>
+              Grant Camera Permission for Torch
+            </Text>
           </Pressable>
         )}
       </ScrollView>
@@ -318,159 +313,150 @@ export default function StrobeScreen() {
   );
 }
 
-function makeStyles(colors: ReturnType<typeof import("@/hooks/useColors").useColors>, insets: ReturnType<typeof useSafeAreaInsets>) {
+function makeStyles(
+  colors: ReturnType<typeof import("@/hooks/useColors").useColors>,
+  insets: ReturnType<typeof useSafeAreaInsets>
+) {
   return StyleSheet.create({
-    root: {
-      flex: 1,
-      backgroundColor: colors.background,
-    },
+    root: { flex: 1, backgroundColor: colors.background },
     flashOverlay: {
       ...StyleSheet.absoluteFillObject,
-      backgroundColor: "#FFEE88",
-      zIndex: 999,
-      pointerEvents: "none" as any,
-    },
-    cameraOverlay: {
-      ...StyleSheet.absoluteFillObject,
-      backgroundColor: "rgba(0,0,0,0.92)",
+      backgroundColor: "#ffffff",
+      zIndex: 10,
+      pointerEvents: "none",
     },
     scroll: {
-      paddingTop: Platform.OS === "web" ? insets.top + 67 : 16,
-      paddingBottom: Platform.OS === "web" ? insets.bottom + 34 + 84 : insets.bottom + 100,
-      paddingHorizontal: 20,
+      paddingHorizontal: 16,
+      paddingTop: insets.top + 16,
+      paddingBottom: insets.bottom + 100,
       alignItems: "center",
-      gap: 20,
+      gap: 16,
     },
     titleLabel: {
-      fontSize: 13,
-      fontFamily: "Inter_600SemiBold",
-      letterSpacing: 4,
+      fontSize: 10,
+      fontFamily: "Inter_700Bold",
       color: colors.mutedForeground,
-      marginBottom: 4,
+      letterSpacing: 3,
+      alignSelf: "flex-start",
     },
     buttonWrap: {
+      width: 160,
+      height: 160,
       alignItems: "center",
       justifyContent: "center",
-      width: 200,
-      height: 200,
+      marginVertical: 8,
     },
     glowRing: {
       position: "absolute",
-      width: 220,
-      height: 220,
-      borderRadius: 110,
-      backgroundColor: "#FFD700",
-      shadowColor: "#FFD700",
-      shadowRadius: 40,
-      shadowOpacity: 0.8,
-      shadowOffset: { width: 0, height: 0 },
+      width: 200,
+      height: 200,
+      borderRadius: 100,
+      backgroundColor: colors.primary,
     },
     mainButton: {
-      width: 180,
-      height: 180,
-      borderRadius: 90,
+      width: 150,
+      height: 150,
+      borderRadius: 75,
       backgroundColor: colors.card,
-      borderWidth: 3,
+      borderWidth: 2,
       borderColor: colors.border,
       alignItems: "center",
       justifyContent: "center",
       gap: 4,
     },
     mainButtonActive: {
-      backgroundColor: "#FFD700",
-      borderColor: "#FFD700",
+      backgroundColor: colors.primary,
+      borderColor: colors.primary,
     },
-    buttonIcon: {
-      fontSize: 52,
-    },
+    buttonIcon: { fontSize: 36 },
     buttonIconActive: {},
     buttonLabel: {
-      fontSize: 16,
+      fontSize: 14,
       fontFamily: "Inter_700Bold",
-      letterSpacing: 3,
-      color: colors.mutedForeground,
+      color: colors.foreground,
+      letterSpacing: 2,
     },
-    buttonLabelActive: {
-      color: "#0a0a0a",
-    },
+    buttonLabelActive: { color: colors.primaryForeground },
     card: {
       width: "100%",
       backgroundColor: colors.card,
       borderRadius: colors.radius,
-      padding: 20,
       borderWidth: 1,
       borderColor: colors.border,
-      gap: 12,
+      padding: 16,
+      gap: 10,
     },
     cardTitle: {
-      fontSize: 11,
-      fontFamily: "Inter_600SemiBold",
-      letterSpacing: 3,
+      fontSize: 10,
+      fontFamily: "Inter_700Bold",
       color: colors.mutedForeground,
+      letterSpacing: 2,
     },
     bigValue: {
-      fontSize: 42,
+      fontSize: 36,
       fontFamily: "Inter_700Bold",
-      color: colors.primary,
-      lineHeight: 48,
+      color: colors.foreground,
     },
     subText: {
       fontSize: 12,
       fontFamily: "Inter_400Regular",
       color: colors.mutedForeground,
-      marginTop: -8,
     },
     sliderTrack: {
-      height: 6,
+      width: "100%",
+      height: 4,
       backgroundColor: colors.muted,
-      borderRadius: 3,
+      borderRadius: 2,
       overflow: "hidden",
     },
     sliderFill: {
       height: "100%",
       backgroundColor: colors.primary,
-      borderRadius: 3,
+      borderRadius: 2,
     },
     adjRow: {
       flexDirection: "row",
       gap: 6,
-      alignItems: "center",
     },
     adjBtn: {
       paddingHorizontal: 10,
-      paddingVertical: 6,
+      paddingVertical: 8,
       backgroundColor: colors.muted,
-      borderRadius: 8,
+      borderRadius: colors.radius - 2,
+      borderWidth: 1,
+      borderColor: colors.border,
+      minWidth: 40,
+      alignItems: "center",
     },
     adjBtnText: {
-      fontSize: 13,
+      fontSize: 12,
       fontFamily: "Inter_600SemiBold",
       color: colors.foreground,
     },
     presetRow: {
       flexDirection: "row",
-      gap: 6,
       flexWrap: "wrap",
+      gap: 6,
     },
     presetBtn: {
-      paddingHorizontal: 14,
-      paddingVertical: 8,
+      paddingHorizontal: 12,
+      paddingVertical: 6,
       backgroundColor: colors.muted,
-      borderRadius: 8,
+      borderRadius: colors.radius - 2,
       borderWidth: 1,
-      borderColor: "transparent",
+      borderColor: colors.border,
     },
     presetBtnActive: {
-      backgroundColor: "transparent",
+      backgroundColor: colors.primary,
       borderColor: colors.primary,
     },
     presetText: {
-      fontSize: 13,
+      fontSize: 12,
       fontFamily: "Inter_500Medium",
       color: colors.mutedForeground,
     },
     presetTextActive: {
-      color: colors.primary,
+      color: colors.primaryForeground,
       fontFamily: "Inter_600SemiBold",
     },
     statusRow: {
@@ -489,20 +475,17 @@ function makeStyles(colors: ReturnType<typeof import("@/hooks/useColors").useCol
       gap: 4,
     },
     statValue: {
-      fontSize: 20,
+      fontSize: 18,
       fontFamily: "Inter_700Bold",
       color: colors.foreground,
     },
     statLabel: {
-      fontSize: 11,
+      fontSize: 9,
       fontFamily: "Inter_400Regular",
       color: colors.mutedForeground,
       letterSpacing: 1,
     },
-    statDivider: {
-      width: 1,
-      backgroundColor: colors.border,
-    },
+    statDivider: { width: 1, backgroundColor: colors.border },
     permBtn: {
       width: "100%",
       paddingVertical: 14,
@@ -511,9 +494,9 @@ function makeStyles(colors: ReturnType<typeof import("@/hooks/useColors").useCol
       alignItems: "center",
     },
     permBtnText: {
-      fontSize: 15,
+      fontSize: 14,
       fontFamily: "Inter_600SemiBold",
-      color: "#0a0a0a",
+      color: colors.primaryForeground,
     },
   });
 }

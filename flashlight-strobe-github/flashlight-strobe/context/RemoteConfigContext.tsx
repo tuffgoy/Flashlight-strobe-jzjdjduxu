@@ -1,4 +1,28 @@
-import AsyncStorage from '@react-native-async-storage/async-storage';
+/**
+ * RemoteConfigContext
+ *
+ * Fetches app configuration from a hardcoded R2 URL on launch.
+ * The URL is NOT user-configurable — it is baked into the app so that
+ * only the developer can change where config comes from (by deploying a
+ * new build). This prevents tampering via the Settings screen.
+ *
+ * To update remote config: upload a new strobe-config.json to R2 at:
+ *   https://pub-fa68c3ee55314901b1f1da18e733b041.r2.dev/strobe-config.json
+ *
+ * Example strobe-config.json:
+ * {
+ *   "version": "1.0.0",
+ *   "minHz": 0.5,
+ *   "maxHz": 120,
+ *   "apkDownloadUrl": "https://xshare.netlify.app/f/<file-id>",
+ *   "latestApkVersion": "1.2.0",
+ *   "features": { "screenMode": true, "torchMode": true, ... },
+ *   "message": null,
+ *   "announcement": null
+ * }
+ */
+
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import React, {
   createContext,
   useCallback,
@@ -6,10 +30,13 @@ import React, {
   useEffect,
   useRef,
   useState,
-} from 'react';
+} from "react";
 
-const CONFIG_URL_KEY = '@strobe_remote_config_url';
-const CONFIG_CACHE_KEY = '@strobe_remote_config_cache';
+// ── Hardcoded config endpoint — not editable by the user ─────────────────────
+const HARDCODED_CONFIG_URL =
+  "https://pub-fa68c3ee55314901b1f1da18e733b041.r2.dev/strobe-config.json";
+
+const CONFIG_CACHE_KEY = "@strobe_remote_config_cache";
 
 export interface RemoteConfig {
   version: string;
@@ -31,9 +58,9 @@ export interface RemoteConfig {
 }
 
 export const DEFAULT_CONFIG: RemoteConfig = {
-  version: '1.0.0',
+  version: "1.0.0",
   minHz: 0.5,
-  maxHz: 30,
+  maxHz: 120,
   apkDownloadUrl: null,
   latestApkVersion: null,
   features: {
@@ -51,10 +78,11 @@ export const DEFAULT_CONFIG: RemoteConfig = {
 
 interface RemoteConfigContextType {
   config: RemoteConfig;
+  /** Always equals HARDCODED_CONFIG_URL — exposed for display only. */
   configUrl: string;
+  /** No-op: the config URL is hardcoded and cannot be changed at runtime. */
   setConfigUrl: (url: string) => void;
-  /** Fetch config from `urlOverride` (or current saved URL if omitted). */
-  fetchConfig: (urlOverride?: string) => Promise<{ success: boolean; error?: string }>;
+  fetchConfig: () => Promise<{ success: boolean; error?: string }>;
   isLoading: boolean;
   lastFetched: number | null;
   error: string | null;
@@ -62,7 +90,7 @@ interface RemoteConfigContextType {
 
 const RemoteConfigContext = createContext<RemoteConfigContextType>({
   config: DEFAULT_CONFIG,
-  configUrl: '',
+  configUrl: HARDCODED_CONFIG_URL,
   setConfigUrl: () => {},
   fetchConfig: async () => ({ success: false }),
   isLoading: false,
@@ -72,103 +100,81 @@ const RemoteConfigContext = createContext<RemoteConfigContextType>({
 
 export function RemoteConfigProvider({ children }: { children: React.ReactNode }) {
   const [config, setConfig] = useState<RemoteConfig>(DEFAULT_CONFIG);
-  const [configUrl, setConfigUrlState] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [lastFetched, setLastFetched] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
-
-  // Track whether we've done the initial auto-fetch so we only do it once.
   const hasAutoFetched = useRef(false);
 
-  // Load saved URL and cached config on mount
+  // Load cached config on mount for instant UI (no flicker while fetching)
   useEffect(() => {
-    (async () => {
-      try {
-        const [savedUrl, cachedConfig] = await Promise.all([
-          AsyncStorage.getItem(CONFIG_URL_KEY),
-          AsyncStorage.getItem(CONFIG_CACHE_KEY),
-        ]);
-        if (savedUrl) setConfigUrlState(savedUrl);
-        if (cachedConfig) {
-          const parsed = JSON.parse(cachedConfig) as Partial<RemoteConfig>;
-          setConfig({ ...DEFAULT_CONFIG, ...parsed, features: { ...DEFAULT_CONFIG.features, ...(parsed.features ?? {}) } });
-        }
-      } catch (e) {
-        console.warn('[RemoteConfig] Failed to load saved config:', e);
-      }
-    })();
-  }, []);
-
-  const setConfigUrl = useCallback((url: string) => {
-    setConfigUrlState(url);
-    AsyncStorage.setItem(CONFIG_URL_KEY, url).catch((e) =>
-      console.warn('[RemoteConfig] Failed to save URL:', e),
-    );
-  }, []);
-
-  /**
-   * Fetch remote config.
-   * Pass `urlOverride` to bypass the current state (useful right after setConfigUrl
-   * before the state update has propagated).
-   */
-  const fetchConfig = useCallback(
-    async (urlOverride?: string): Promise<{ success: boolean; error?: string }> => {
-      const url = (urlOverride ?? configUrl).trim();
-
-      if (!url) {
-        setError('No remote config URL configured');
-        return { success: false, error: 'No URL configured' };
-      }
-
-      setIsLoading(true);
-      setError(null);
-
-      try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 10000);
-        const res = await fetch(url, {
-          signal: controller.signal,
-          headers: { 'Cache-Control': 'no-cache' },
-        });
-        clearTimeout(timeoutId);
-
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-        const json = await res.json() as Partial<RemoteConfig>;
-        const merged: RemoteConfig = {
+    AsyncStorage.getItem(CONFIG_CACHE_KEY)
+      .then((raw) => {
+        if (!raw) return;
+        const parsed = JSON.parse(raw) as Partial<RemoteConfig>;
+        setConfig({
           ...DEFAULT_CONFIG,
-          ...json,
-          features: { ...DEFAULT_CONFIG.features, ...(json.features ?? {}) },
-        };
+          ...parsed,
+          features: { ...DEFAULT_CONFIG.features, ...(parsed.features ?? {}) },
+        });
+      })
+      .catch(() => {});
+  }, []);
 
-        setConfig(merged);
-        setLastFetched(Date.now());
-        await AsyncStorage.setItem(CONFIG_CACHE_KEY, JSON.stringify(merged));
-        return { success: true };
-      } catch (e: unknown) {
-        const msg = e instanceof Error ? e.message : 'Unknown error';
-        setError(msg);
-        return { success: false, error: msg };
-      } finally {
-        setIsLoading(false);
-      }
-    },
-    [configUrl],
-  );
+  const fetchConfig = useCallback(async (): Promise<{ success: boolean; error?: string }> => {
+    setIsLoading(true);
+    setError(null);
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 10000);
+      const res = await fetch(HARDCODED_CONFIG_URL, {
+        signal: controller.signal,
+        headers: { "Cache-Control": "no-cache" },
+      });
+      clearTimeout(timeoutId);
 
-  // Auto-fetch once when a non-empty configUrl first becomes available (after
-  // AsyncStorage load). Using configUrl in deps so this reacts to the initial load.
-  useEffect(() => {
-    if (configUrl && !hasAutoFetched.current) {
-      hasAutoFetched.current = true;
-      // Pass URL explicitly so we don't race against the state read inside fetchConfig.
-      fetchConfig(configUrl).catch(() => {});
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+      const json = (await res.json()) as Partial<RemoteConfig>;
+      const merged: RemoteConfig = {
+        ...DEFAULT_CONFIG,
+        ...json,
+        features: { ...DEFAULT_CONFIG.features, ...(json.features ?? {}) },
+      };
+      setConfig(merged);
+      setLastFetched(Date.now());
+      await AsyncStorage.setItem(CONFIG_CACHE_KEY, JSON.stringify(merged));
+      return { success: true };
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : "Unknown error";
+      setError(msg);
+      return { success: false, error: msg };
+    } finally {
+      setIsLoading(false);
     }
-  }, [configUrl, fetchConfig]);
+  }, []);
+
+  // Auto-fetch once on mount
+  useEffect(() => {
+    if (!hasAutoFetched.current) {
+      hasAutoFetched.current = true;
+      fetchConfig().catch(() => {});
+    }
+  }, [fetchConfig]);
 
   return (
     <RemoteConfigContext.Provider
-      value={{ config, configUrl, setConfigUrl, fetchConfig, isLoading, lastFetched, error }}
+      value={{
+        config,
+        configUrl: HARDCODED_CONFIG_URL,
+        setConfigUrl: () => {
+          // Intentionally a no-op: URL is hardcoded
+          console.warn("[RemoteConfig] setConfigUrl is disabled; URL is hardcoded.");
+        },
+        fetchConfig,
+        isLoading,
+        lastFetched,
+        error,
+      }}
     >
       {children}
     </RemoteConfigContext.Provider>

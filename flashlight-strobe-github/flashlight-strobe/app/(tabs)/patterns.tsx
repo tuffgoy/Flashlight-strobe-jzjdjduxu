@@ -1,5 +1,12 @@
-import { CameraView, useCameraPermissions } from "expo-camera";
+/**
+ * Patterns screen — predefined strobe sequences (SOS, Police, Heartbeat, etc.)
+ *
+ * Performance: uses TorchCamera forwardRef component so only the 0×0 hidden
+ * camera re-renders on each torch step, not the full PatternsScreen.
+ */
+
 import * as Haptics from "expo-haptics";
+import { useCameraPermissions } from "expo-camera";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   Animated,
@@ -12,6 +19,7 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
+import { TorchCamera, TorchCameraHandle } from "@/components/TorchCamera";
 import { useColors } from "@/hooks/useColors";
 
 interface Pattern {
@@ -111,6 +119,24 @@ const PATTERNS: Pattern[] = [
       { on: true, ms: 300 }, { on: false, ms: 700 },
     ],
   },
+  {
+    id: "rapid_fire",
+    name: "Rapid Fire",
+    description: "High-speed continuous burst at ~25Hz",
+    color: "#f97316",
+    sequence: [
+      { on: true, ms: 20 }, { on: false, ms: 20 },
+    ],
+  },
+  {
+    id: "strobe_club",
+    name: "Club Strobe",
+    description: "Classic club strobe at ~10Hz",
+    color: "#8b5cf6",
+    sequence: [
+      { on: true, ms: 50 }, { on: false, ms: 50 },
+    ],
+  },
 ];
 
 export default function PatternsScreen() {
@@ -118,11 +144,19 @@ export default function PatternsScreen() {
   const insets = useSafeAreaInsets();
   const [permission, requestPermission] = useCameraPermissions();
   const [activeId, setActiveId] = useState<string | null>(null);
-  const [torchOn, setTorchOn] = useState(false);
 
+  const torchRef = useRef<TorchCameraHandle>(null);
   const flashAnim = useRef(new Animated.Value(0)).current;
   const seqRef = useRef<{ pattern: Pattern; idx: number } | null>(null);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Request permission on mount (non-blocking)
+  useEffect(() => {
+    if (!permission?.granted && permission?.canAskAgain !== false) {
+      requestPermission().catch(() => {});
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const clearTimer = useCallback(() => {
     if (timeoutRef.current) {
@@ -135,7 +169,9 @@ export default function PatternsScreen() {
     (pattern: Pattern, idx: number) => {
       seqRef.current = { pattern, idx };
       const step = pattern.sequence[idx];
-      setTorchOn(step.on);
+
+      // Only the TorchCamera component re-renders on setTorch — not PatternsScreen
+      torchRef.current?.setTorch(step.on);
 
       if (Platform.OS === "web") {
         Animated.timing(flashAnim, {
@@ -157,19 +193,19 @@ export default function PatternsScreen() {
     if (activeId === pattern.id) {
       clearTimer();
       setActiveId(null);
-      setTorchOn(false);
+      torchRef.current?.setTorch(false);
       flashAnim.setValue(0);
       await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
       return;
     }
 
-    if (!permission?.granted) {
+    if (!permission?.granted && Platform.OS !== "web") {
       const result = await requestPermission();
-      if (!result.granted && Platform.OS !== "web") return;
+      if (!result.granted) return;
     }
 
     clearTimer();
-    setTorchOn(false);
+    torchRef.current?.setTorch(false);
     setActiveId(pattern.id);
     await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
     runSequence(pattern, 0);
@@ -178,7 +214,7 @@ export default function PatternsScreen() {
   useEffect(() => {
     return () => {
       clearTimer();
-      setTorchOn(false);
+      torchRef.current?.setTorch(false);
     };
   }, [clearTimer]);
 
@@ -187,29 +223,19 @@ export default function PatternsScreen() {
 
   return (
     <View style={styles.root}>
+      {/* Web flash overlay */}
       {Platform.OS === "web" && (
         <Animated.View
           pointerEvents="none"
           style={[
             styles.flashOverlay,
-            {
-              opacity: flashAnim,
-              backgroundColor: activePattern?.color ?? "#FFEE88",
-            },
+            { opacity: flashAnim, backgroundColor: activePattern?.color ?? "#FFEE88" },
           ]}
         />
       )}
 
-      {Platform.OS !== "web" && permission?.granted && (
-        <CameraView
-          style={StyleSheet.absoluteFillObject}
-          enableTorch={torchOn}
-          facing="back"
-        />
-      )}
-      {Platform.OS !== "web" && permission?.granted && (
-        <View style={styles.cameraOverlay} />
-      )}
+      {/* Invisible 0×0 camera for torch control */}
+      <TorchCamera ref={torchRef} />
 
       <ScrollView
         contentContainerStyle={styles.scroll}
@@ -251,9 +277,10 @@ export default function PatternsScreen() {
           })}
         </View>
 
+        {/* Camera permission hint */}
         {Platform.OS !== "web" && !permission?.granted && (
-          <Pressable style={styles.permBtn} onPress={requestPermission}>
-            <Text style={styles.permBtnText}>Grant Camera Permission</Text>
+          <Pressable style={styles.permBtn} onPress={() => requestPermission()}>
+            <Text style={styles.permBtnText}>Grant Camera Permission for Torch</Text>
           </Pressable>
         )}
       </ScrollView>
@@ -261,55 +288,41 @@ export default function PatternsScreen() {
   );
 }
 
-function makeStyles(colors: ReturnType<typeof import("@/hooks/useColors").useColors>, insets: ReturnType<typeof useSafeAreaInsets>) {
+function makeStyles(
+  colors: ReturnType<typeof import("@/hooks/useColors").useColors>,
+  insets: ReturnType<typeof useSafeAreaInsets>
+) {
   return StyleSheet.create({
-    root: {
-      flex: 1,
-      backgroundColor: colors.background,
-    },
+    root: { flex: 1, backgroundColor: colors.background },
     flashOverlay: {
       ...StyleSheet.absoluteFillObject,
-      zIndex: 999,
-      pointerEvents: "none" as any,
-    },
-    cameraOverlay: {
-      ...StyleSheet.absoluteFillObject,
-      backgroundColor: "rgba(0,0,0,0.92)",
+      zIndex: 10,
     },
     scroll: {
-      paddingTop: Platform.OS === "web" ? insets.top + 67 : 16,
-      paddingBottom: Platform.OS === "web" ? insets.bottom + 34 + 84 : insets.bottom + 100,
-      paddingHorizontal: 20,
+      paddingHorizontal: 16,
+      paddingTop: insets.top + 16,
+      paddingBottom: insets.bottom + 100,
       gap: 16,
     },
     sectionTitle: {
-      fontSize: 11,
-      fontFamily: "Inter_600SemiBold",
-      letterSpacing: 4,
+      fontSize: 10,
+      fontFamily: "Inter_700Bold",
       color: colors.mutedForeground,
-      marginBottom: 4,
+      letterSpacing: 3,
     },
     activeCard: {
       flexDirection: "row",
       alignItems: "center",
-      gap: 10,
-      padding: 14,
+      gap: 8,
+      padding: 12,
       borderRadius: colors.radius,
       borderWidth: 1,
+      borderColor: colors.border,
       backgroundColor: colors.card,
     },
-    activeDot: {
-      width: 10,
-      height: 10,
-      borderRadius: 5,
-    },
-    activeName: {
-      fontSize: 14,
-      fontFamily: "Inter_600SemiBold",
-    },
-    grid: {
-      gap: 12,
-    },
+    activeDot: { width: 10, height: 10, borderRadius: 5 },
+    activeName: { fontSize: 14, fontFamily: "Inter_600SemiBold" },
+    grid: { gap: 12 },
     patternCard: {
       backgroundColor: colors.card,
       borderRadius: colors.radius,
@@ -319,12 +332,7 @@ function makeStyles(colors: ReturnType<typeof import("@/hooks/useColors").useCol
       gap: 6,
       position: "relative",
     },
-    colorDot: {
-      width: 14,
-      height: 14,
-      borderRadius: 7,
-      marginBottom: 4,
-    },
+    colorDot: { width: 14, height: 14, borderRadius: 7, marginBottom: 4 },
     patternName: {
       fontSize: 20,
       fontFamily: "Inter_700Bold",
@@ -358,7 +366,7 @@ function makeStyles(colors: ReturnType<typeof import("@/hooks/useColors").useCol
     permBtnText: {
       fontSize: 15,
       fontFamily: "Inter_600SemiBold",
-      color: "#0a0a0a",
+      color: colors.primaryForeground,
     },
   });
 }
