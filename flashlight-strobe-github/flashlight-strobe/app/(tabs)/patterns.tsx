@@ -165,13 +165,14 @@ export default function PatternsScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Wake lock
+  // Wake lock — also released on unmount so leaving the tab doesn't leak it
   useEffect(() => {
     if (activeId) {
       KeepAwake.activateKeepAwakeAsync().catch(() => {});
     } else {
       KeepAwake.deactivateKeepAwake();
     }
+    return () => { KeepAwake.deactivateKeepAwake(); };
   }, [activeId]);
 
   const clearTimer = useCallback(() => {

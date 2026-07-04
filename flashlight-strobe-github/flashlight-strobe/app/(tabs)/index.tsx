@@ -94,6 +94,8 @@ export default function StrobeScreen() {
     } else {
       KeepAwake.deactivateKeepAwake();
     }
+    // Ensure wake lock is released on unmount regardless of isActive state
+    return () => { KeepAwake.deactivateKeepAwake(); };
   }, [isActive]);
 
   // ── Auto-stop countdown ────────────────────────────────────────────────────

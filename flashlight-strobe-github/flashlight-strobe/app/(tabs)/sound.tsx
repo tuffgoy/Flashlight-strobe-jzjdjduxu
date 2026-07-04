@@ -110,11 +110,13 @@ export default function SoundScreen() {
     }
     if (!granted) return;
 
+    // Activate wake lock AFTER we're sure we'll actually start
     await KeepAwake.activateKeepAwakeAsync().catch(() => {});
-    await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
 
+    let recordingStarted = false;
     const recording = new Audio.Recording();
     try {
+      await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
       await recording.prepareToRecordAsync({
         android: {
           extension: ".m4a",
@@ -138,16 +140,24 @@ export default function SoundScreen() {
         web: {},
       } as Audio.RecordingOptions);
       await recording.startAsync();
+      recordingStarted = true;
       recordingRef.current = recording;
     } catch {
+      // Setup failed — release wake lock and any partial recording
+      KeepAwake.deactivateKeepAwake();
+      if (!recordingStarted) {
+        recording.stopAndUnloadAsync().catch(() => {});
+      }
       return;
     }
 
     const dbThreshold = sensitivityToDb(threshold);
+    let statusPending = false; // guard against overlapping getStatusAsync calls
 
     pollRef.current = setInterval(async () => {
       const rec = recordingRef.current;
-      if (!rec) return;
+      if (!rec || statusPending) return;
+      statusPending = true;
       try {
         const status = await rec.getStatusAsync();
         if (status.isRecording && typeof status.metering === "number") {
@@ -156,9 +166,11 @@ export default function SoundScreen() {
           }
         }
       } catch {
-        // ignore
+        // ignore transient errors
+      } finally {
+        statusPending = false;
       }
-    }, 40); // poll at 25Hz
+    }, 40); // poll at 25 Hz
 
     setIsListening(true);
   }, [micGranted, requestMicPermission, threshold, triggerFlash]);
