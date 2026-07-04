@@ -16,12 +16,17 @@
     "ios": {
       "supportsTablet": false,
       "infoPlist": {
-        "NSCameraUsageDescription": "Flashlight Strobe uses the camera permission to access your device's rear torch LED for strobe effects. No images or video are captured."
+        "NSCameraUsageDescription": "Flashlight Strobe uses the camera permission to access your device's rear torch LED for strobe effects. No images or video are captured.",
+        "NSMicrophoneUsageDescription": "Flashlight Strobe uses the microphone to detect sounds and beats so it can sync the flash light to your music or claps."
       }
     },
     "android": {
       "package": "com.flashlightstrobe.app",
-      "permissions": ["android.permission.CAMERA", "android.permission.FLASHLIGHT"],
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.FLASHLIGHT",
+        "android.permission.RECORD_AUDIO"
+      ],
       "enableProguardInReleaseBuilds": true,
       "enableShrinkResourcesInReleaseBuilds": true
     },
@@ -37,7 +42,9 @@
       ],
       "expo-font",
       "expo-web-browser",
-      "expo-camera"
+      "expo-camera",
+      "expo-av",
+      "expo-keep-awake"
     ],
     "experiments": {
       "typedRoutes": true,

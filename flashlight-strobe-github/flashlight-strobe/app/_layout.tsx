@@ -16,6 +16,7 @@ import {
   Modal,
   Platform,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   View,
@@ -25,6 +26,8 @@ import { KeyboardProvider } from "react-native-keyboard-controller";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 
 import { ErrorBoundary } from "@/components/ErrorBoundary";
+import { RemoteConfigProvider } from "@/context/RemoteConfigContext";
+import { LanguageProvider } from "@/context/LanguageContext";
 
 // ── App version (keep in sync with app.json) ─────────────────────────────────
 const APP_VERSION = "1.1.0";
@@ -35,6 +38,7 @@ const SUPABASE_ANON_KEY =
   "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZkcHJwYXFsZXJuZ3ZjbXp3Y2pnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA3MzI3MjUsImV4cCI6MjA5NjMwODcyNX0.b9_PJEs3F8UH3qCK0bs-nUDvG81fBD0BP4Iec79C3-E";
 
 const DISMISSED_VERSION_KEY = "flashlight_dismissed_update_version";
+const EPILEPSY_ACCEPTED_KEY = "@strobe_epilepsy_accepted";
 
 interface UpdateInfo {
   version: string;
@@ -42,13 +46,6 @@ interface UpdateInfo {
   notes?: string;
 }
 
-/**
- * Fetches the latest APK info from the Supabase app_settings table.
- * The admin sets these via the xShare admin panel or Supabase dashboard:
- *   key=flashlight_apk_version  value="1.2.0"
- *   key=flashlight_apk_url      value="https://xshare.netlify.app/f/<file-id>"
- *   key=flashlight_apk_notes    value="Bug fixes and new patterns" (optional)
- */
 async function fetchUpdateInfo(): Promise<UpdateInfo | null> {
   const keys = ["flashlight_apk_version", "flashlight_apk_url", "flashlight_apk_notes"];
   const filter = `key=in.(${keys.map((k) => `"${k}"`).join(",")})`;
@@ -74,7 +71,6 @@ async function fetchUpdateInfo(): Promise<UpdateInfo | null> {
   };
 }
 
-/** Returns true when remoteVersion is strictly newer than currentVersion (semver). */
 function isNewer(current: string, remote: string): boolean {
   const parse = (v: string) => v.replace(/^v/, "").split(".").map(Number);
   const [cMaj, cMin, cPat] = parse(current);
@@ -97,19 +93,17 @@ function UpdateDialog({
 }) {
   return (
     <Modal transparent animationType="fade" statusBarTranslucent>
-      <View style={dialogStyles.backdrop}>
-        <View style={dialogStyles.card}>
-          <Text style={dialogStyles.emoji}>🚀</Text>
-          <Text style={dialogStyles.title}>Update Available</Text>
-          <Text style={dialogStyles.version}>Version {info.version}</Text>
-          {info.notes ? (
-            <Text style={dialogStyles.notes}>{info.notes}</Text>
-          ) : null}
-          <Pressable style={dialogStyles.primaryBtn} onPress={onDownload}>
-            <Text style={dialogStyles.primaryBtnText}>Download Update</Text>
+      <View style={dlg.backdrop}>
+        <View style={dlg.card}>
+          <Text style={dlg.emoji}>🚀</Text>
+          <Text style={dlg.title}>Update Available</Text>
+          <Text style={dlg.version}>Version {info.version}</Text>
+          {info.notes ? <Text style={dlg.notes}>{info.notes}</Text> : null}
+          <Pressable style={dlg.primaryBtn} onPress={onDownload}>
+            <Text style={dlg.primaryBtnText}>Download Update</Text>
           </Pressable>
-          <Pressable style={dialogStyles.secondaryBtn} onPress={onDismiss}>
-            <Text style={dialogStyles.secondaryBtnText}>Remind Me Later</Text>
+          <Pressable style={dlg.secondaryBtn} onPress={onDismiss}>
+            <Text style={dlg.secondaryBtnText}>Remind Me Later</Text>
           </Pressable>
         </View>
       </View>
@@ -117,14 +111,44 @@ function UpdateDialog({
   );
 }
 
-const dialogStyles = StyleSheet.create({
+// ── Epilepsy warning dialog ───────────────────────────────────────────────────
+
+function EpilepsyWarning({ onAccept }: { onAccept: () => void }) {
+  return (
+    <Modal transparent animationType="fade" statusBarTranslucent>
+      <View style={dlg.backdrop}>
+        <ScrollView contentContainerStyle={dlg.scrollContent}>
+          <View style={dlg.card}>
+            <Text style={dlg.emoji}>⚠️</Text>
+            <Text style={dlg.title}>Safety Warning</Text>
+            <Text style={dlg.warningBody}>
+              This app produces rapidly flashing lights.{"\n\n"}
+              Flashing lights can trigger seizures in people with photosensitive epilepsy or
+              similar conditions. Do not use this app if you or anyone nearby has been
+              diagnosed with epilepsy or is sensitive to flashing light.{"\n\n"}
+              Keep the device at a safe distance and take regular breaks.{"\n\n"}
+              By tapping Continue, you confirm that you have read and understood this warning.
+            </Text>
+            <Pressable style={dlg.primaryBtn} onPress={onAccept}>
+              <Text style={dlg.primaryBtnText}>I Understand, Continue</Text>
+            </Pressable>
+          </View>
+        </ScrollView>
+      </View>
+    </Modal>
+  );
+}
+
+const dlg = StyleSheet.create({
   backdrop: {
     flex: 1,
-    backgroundColor: "rgba(0,0,0,0.7)",
+    backgroundColor: "rgba(0,0,0,0.85)",
     alignItems: "center",
     justifyContent: "center",
-    paddingHorizontal: 32,
+    paddingHorizontal: 28,
+    paddingVertical: 40,
   },
+  scrollContent: { flexGrow: 1, justifyContent: "center" },
   card: {
     width: "100%",
     backgroundColor: "#141414",
@@ -133,55 +157,26 @@ const dialogStyles = StyleSheet.create({
     borderColor: "#2a2a2a",
     padding: 28,
     alignItems: "center",
-    gap: 8,
+    gap: 10,
   },
-  emoji: {
-    fontSize: 44,
-    marginBottom: 4,
-  },
-  title: {
-    fontSize: 20,
-    fontFamily: "Inter_700Bold",
-    color: "#f4f4f5",
-    textAlign: "center",
-  },
-  version: {
-    fontSize: 13,
-    fontFamily: "Inter_500Medium",
-    color: "#71717a",
-    marginBottom: 4,
-  },
+  emoji: { fontSize: 44, marginBottom: 4 },
+  title: { fontSize: 20, fontFamily: "Inter_700Bold", color: "#f4f4f5", textAlign: "center" },
+  version: { fontSize: 13, fontFamily: "Inter_500Medium", color: "#71717a", marginBottom: 4 },
   notes: {
-    fontSize: 14,
-    fontFamily: "Inter_400Regular",
-    color: "#a1a1aa",
-    textAlign: "center",
-    lineHeight: 20,
-    marginBottom: 4,
+    fontSize: 14, fontFamily: "Inter_400Regular", color: "#a1a1aa",
+    textAlign: "center", lineHeight: 20, marginBottom: 4,
+  },
+  warningBody: {
+    fontSize: 14, fontFamily: "Inter_400Regular", color: "#a1a1aa",
+    textAlign: "center", lineHeight: 22,
   },
   primaryBtn: {
-    width: "100%",
-    backgroundColor: "#FFD700",
-    borderRadius: 12,
-    paddingVertical: 14,
-    alignItems: "center",
-    marginTop: 8,
+    width: "100%", backgroundColor: "#FFD700", borderRadius: 12,
+    paddingVertical: 14, alignItems: "center", marginTop: 8,
   },
-  primaryBtnText: {
-    fontSize: 15,
-    fontFamily: "Inter_700Bold",
-    color: "#0a0a0a",
-  },
-  secondaryBtn: {
-    width: "100%",
-    paddingVertical: 12,
-    alignItems: "center",
-  },
-  secondaryBtnText: {
-    fontSize: 14,
-    fontFamily: "Inter_400Regular",
-    color: "#52525b",
-  },
+  primaryBtnText: { fontSize: 15, fontFamily: "Inter_700Bold", color: "#0a0a0a" },
+  secondaryBtn: { width: "100%", paddingVertical: 12, alignItems: "center" },
+  secondaryBtnText: { fontSize: 14, fontFamily: "Inter_400Regular", color: "#52525b" },
 });
 
 // ── Root layout ───────────────────────────────────────────────────────────────
@@ -207,7 +202,23 @@ export default function RootLayout() {
   });
 
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
+  const [showEpilepsyWarning, setShowEpilepsyWarning] = useState(false);
   const checkedRef = useRef(false);
+
+  // ── Epilepsy warning — show on first launch ───────────────────────────────
+  useEffect(() => {
+    if (!fontsLoaded && !fontError) return;
+    AsyncStorage.getItem(EPILEPSY_ACCEPTED_KEY)
+      .then((accepted) => {
+        if (!accepted) setShowEpilepsyWarning(true);
+      })
+      .catch(() => {});
+  }, [fontsLoaded, fontError]);
+
+  const handleEpilepsyAccept = async () => {
+    await AsyncStorage.setItem(EPILEPSY_ACCEPTED_KEY, "1").catch(() => {});
+    setShowEpilepsyWarning(false);
+  };
 
   // ── Remote update check (runs once after fonts load) ─────────────────────
   useEffect(() => {
@@ -219,11 +230,8 @@ export default function RootLayout() {
         const info = await fetchUpdateInfo();
         if (!info) return;
         if (!isNewer(APP_VERSION, info.version)) return;
-
-        // Skip if the user already dismissed this specific version
         const dismissed = await AsyncStorage.getItem(DISMISSED_VERSION_KEY).catch(() => null);
         if (dismissed === info.version) return;
-
         setUpdateInfo(info);
       } catch {
         // Never crash the app over an update check failure
@@ -232,9 +240,7 @@ export default function RootLayout() {
   }, [fontsLoaded, fontError]);
 
   useEffect(() => {
-    if (fontsLoaded || fontError) {
-      SplashScreen.hideAsync();
-    }
+    if (fontsLoaded || fontError) SplashScreen.hideAsync();
   }, [fontsLoaded, fontError]);
 
   if (!fontsLoaded && !fontError) return null;
@@ -251,7 +257,6 @@ export default function RootLayout() {
 
   const handleDismiss = async () => {
     if (updateInfo) {
-      // Remember this version so the dialog doesn't appear again until a newer one ships
       await AsyncStorage.setItem(DISMISSED_VERSION_KEY, updateInfo.version).catch(() => {});
     }
     setUpdateInfo(null);
@@ -261,18 +266,27 @@ export default function RootLayout() {
     <SafeAreaProvider>
       <ErrorBoundary>
         <QueryClientProvider client={queryClient}>
-          <GestureHandlerRootView>
-            <KeyboardProvider>
-              <RootLayoutNav />
-              {updateInfo && (
-                <UpdateDialog
-                  info={updateInfo}
-                  onDownload={handleDownload}
-                  onDismiss={handleDismiss}
-                />
-              )}
-            </KeyboardProvider>
-          </GestureHandlerRootView>
+          <LanguageProvider>
+            <RemoteConfigProvider>
+              <GestureHandlerRootView>
+                <KeyboardProvider>
+                  <RootLayoutNav />
+                  {/* Epilepsy warning shown on first launch before anything else */}
+                  {showEpilepsyWarning && (
+                    <EpilepsyWarning onAccept={handleEpilepsyAccept} />
+                  )}
+                  {/* Update dialog shown after epilepsy warning is dismissed */}
+                  {!showEpilepsyWarning && updateInfo && (
+                    <UpdateDialog
+                      info={updateInfo}
+                      onDownload={handleDownload}
+                      onDismiss={handleDismiss}
+                    />
+                  )}
+                </KeyboardProvider>
+              </GestureHandlerRootView>
+            </RemoteConfigProvider>
+          </LanguageProvider>
         </QueryClientProvider>
       </ErrorBoundary>
     </SafeAreaProvider>

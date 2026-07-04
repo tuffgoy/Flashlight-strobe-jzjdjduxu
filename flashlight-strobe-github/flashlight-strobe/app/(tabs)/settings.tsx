@@ -1,18 +1,11 @@
 /**
- * Settings screen
- *
- * Shows:
- *  • Update available banner (from the Supabase-backed update check in _layout.tsx)
- *  • Remote config status (last fetched, current values) — URL is hardcoded
- *  • Session logs
- *  • About
- *
- * The remote config URL is hardcoded in RemoteConfigContext.tsx and is NOT
- * editable here, preventing users from pointing the app at a rogue config.
+ * Settings screen — user-facing only.
+ * Technical implementation details are NOT shown here.
  */
 
 import * as Haptics from "expo-haptics";
 import { Linking } from "react-native";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import React, { useCallback, useEffect, useState } from "react";
 import {
   ActivityIndicator,
@@ -27,10 +20,20 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { useRemoteConfig } from "@/context/RemoteConfigContext";
+import { useLanguage } from "@/context/LanguageContext";
 import { useColors } from "@/hooks/useColors";
 import { SessionLog, useLogger } from "@/hooks/useLogger";
+import { LANG_LABELS, LangCode } from "@/lib/translations";
 
 const APP_VERSION = "1.1.0";
+const EPILEPSY_KEY = "@strobe_epilepsy_accepted";
+
+function formatDuration(ms: number): string {
+  if (ms < 1000) return "<1s";
+  const s = Math.floor(ms / 1000);
+  const m = Math.floor(s / 60);
+  return m > 0 ? `${m}m ${s % 60}s` : `${s}s`;
+}
 
 function formatTimestamp(ts: number): string {
   const d = new Date(ts);
@@ -40,20 +43,7 @@ function formatTimestamp(ts: number): string {
     d.getMonth() === today.getMonth() &&
     d.getFullYear() === today.getFullYear();
   const time = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  return isToday ? `Today ${time}` : d.toLocaleDateString() + " " + time;
-}
-
-function formatDuration(ms: number): string {
-  if (ms < 1000) return "<1s";
-  const s = Math.floor(ms / 1000);
-  const m = Math.floor(s / 60);
-  const rem = s % 60;
-  if (m > 0) return `${m}m ${rem}s`;
-  return `${s}s`;
-}
-
-function modeLabel(mode: SessionLog["mode"]): string {
-  return { screen: "Screen", torch: "Torch", both: "Both" }[mode] ?? mode;
+  return isToday ? `Today ${time}` : `${d.toLocaleDateString()} ${time}`;
 }
 
 function compareVersions(a: string, b: string): number {
@@ -69,36 +59,30 @@ function compareVersions(a: string, b: string): number {
 export default function SettingsScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
-  const { config, configUrl, fetchConfig, isLoading, lastFetched, error } =
-    useRemoteConfig();
+  const { t, lang, setLang } = useLanguage();
+  const { config, fetchConfig, isLoading, lastFetched, error } = useRemoteConfig();
   const { getLogs, clearLogs } = useLogger();
 
   const [logs, setLogs] = useState<SessionLog[]>([]);
   const [logsLoading, setLogsLoading] = useState(true);
-  const [fetchStatus, setFetchStatus] = useState<"idle" | "success" | "error">("idle");
+  const [checkStatus, setCheckStatus] = useState<"idle" | "ok" | "fail">("idle");
 
   useEffect(() => {
-    getLogs().then((l) => {
-      setLogs(l);
-      setLogsLoading(false);
-    });
+    getLogs().then((l) => { setLogs(l); setLogsLoading(false); });
   }, [getLogs]);
 
-  const handleFetch = useCallback(async () => {
+  const handleCheckUpdates = useCallback(async () => {
     const result = await fetchConfig();
-    setFetchStatus(result.success ? "success" : "error");
-    setTimeout(() => setFetchStatus("idle"), 3000);
-    if (result.success) {
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    }
+    setCheckStatus(result.success ? "ok" : "fail");
+    if (result.success) Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    setTimeout(() => setCheckStatus("idle"), 3000);
   }, [fetchConfig]);
 
   const handleClearLogs = useCallback(() => {
-    Alert.alert("Clear Session Logs", "Delete all recorded sessions?", [
-      { text: "Cancel", style: "cancel" },
+    Alert.alert(t.clearHistory, t.clearHistoryConfirm, [
+      { text: t.cancel, style: "cancel" },
       {
-        text: "Delete",
-        style: "destructive",
+        text: t.delete, style: "destructive",
         onPress: async () => {
           await clearLogs();
           setLogs([]);
@@ -106,15 +90,17 @@ export default function SettingsScreen() {
         },
       },
     ]);
-  }, [clearLogs]);
+  }, [clearLogs, t]);
 
   const handleRefreshLogs = useCallback(() => {
     setLogsLoading(true);
-    getLogs().then((l) => {
-      setLogs(l);
-      setLogsLoading(false);
-    });
+    getLogs().then((l) => { setLogs(l); setLogsLoading(false); });
   }, [getLogs]);
+
+  const handleResetWarning = useCallback(async () => {
+    await AsyncStorage.removeItem(EPILEPSY_KEY);
+    Alert.alert("", "Safety warning will show on next app launch.");
+  }, []);
 
   const updateAvailable =
     config.latestApkVersion &&
@@ -122,42 +108,27 @@ export default function SettingsScreen() {
 
   const s = makeStyles(colors, insets);
 
-  const fetchStatusColor =
-    fetchStatus === "success"
-      ? "#22c55e"
-      : fetchStatus === "error"
-      ? "#ef4444"
-      : error
-      ? "#ef4444"
-      : lastFetched
-      ? "#22c55e"
-      : colors.mutedForeground;
+  const checkBtnLabel =
+    checkStatus === "ok" ? "✓ Up to date" :
+    checkStatus === "fail" ? "⚠ Check failed" :
+    "Check for Updates";
 
-  const fetchStatusText =
-    fetchStatus === "success"
-      ? "Config loaded successfully"
-      : fetchStatus === "error"
-      ? `Error: ${error ?? "fetch failed"}`
-      : error
-      ? `Last error: ${error}`
-      : lastFetched
-      ? `Last fetched ${new Date(lastFetched).toLocaleTimeString()}`
-      : "Not fetched yet";
+  const checkBtnColor =
+    checkStatus === "ok" ? "#22c55e" :
+    checkStatus === "fail" ? "#ef4444" :
+    colors.primary;
 
   return (
     <View style={s.root}>
-      <ScrollView
-        style={s.scroll}
-        contentContainerStyle={s.content}
-        showsVerticalScrollIndicator={false}
-      >
-        {/* ── Update available banner ──────────────────────────────── */}
+      <ScrollView style={s.scroll} contentContainerStyle={s.content} showsVerticalScrollIndicator={false}>
+
+        {/* ── Update banner ─────────────────────────────────────── */}
         {updateAvailable && (
           <View style={s.updateBanner}>
             <View style={{ flex: 1 }}>
-              <Text style={s.updateText}>Update Available</Text>
+              <Text style={s.updateTitle}>{t.updateAvailable}</Text>
               <Text style={s.updateSub}>
-                v{config.latestApkVersion} · You have v{APP_VERSION}
+                v{config.latestApkVersion} is available — you have v{APP_VERSION}
               </Text>
             </View>
             {config.apkDownloadUrl && (
@@ -165,122 +136,106 @@ export default function SettingsScreen() {
                 style={s.downloadBtn}
                 onPress={() => Linking.openURL(config.apkDownloadUrl!)}
               >
-                <Text style={s.downloadBtnText}>Download APK</Text>
+                <Text style={s.downloadBtnText}>{t.downloadUpdate}</Text>
               </Pressable>
             )}
           </View>
         )}
 
-        {/* ── Remote Config ────────────────────────────────────────── */}
+        {/* ── Check for updates ─────────────────────────────────── */}
         <View>
-          <Text style={s.sectionTitle}>REMOTE CONFIG</Text>
-          <View style={s.card}>
-            {/* Status row */}
-            <View style={s.statusRow}>
-              <View style={[s.statusDot, { backgroundColor: fetchStatusColor }]} />
-              <Text style={s.statusText} numberOfLines={1}>
-                {fetchStatusText}
-              </Text>
-            </View>
+          <Text style={s.sectionTitle}>UPDATES</Text>
+          <Pressable
+            style={[s.updateCheckBtn, { backgroundColor: checkBtnColor, opacity: isLoading ? 0.7 : 1 }]}
+            onPress={handleCheckUpdates}
+            disabled={isLoading}
+          >
+            {isLoading
+              ? <ActivityIndicator size="small" color={colors.primaryForeground} />
+              : <Text style={s.updateCheckBtnText}>{checkBtnLabel}</Text>
+            }
+          </Pressable>
+          {!updateAvailable && lastFetched && checkStatus === "idle" && (
+            <Text style={s.lastChecked}>
+              Last checked {new Date(lastFetched).toLocaleTimeString()}
+            </Text>
+          )}
+          {error && checkStatus === "idle" && !lastFetched && (
+            <Text style={[s.lastChecked, { color: "#ef4444" }]}>
+              Couldn't connect — using defaults
+            </Text>
+          )}
+        </View>
 
-            {/* Refresh button */}
-            <Pressable
-              style={[s.btn, s.btnPrimary, isLoading && { opacity: 0.6 }]}
-              onPress={handleFetch}
-              disabled={isLoading}
-            >
-              {isLoading ? (
-                <ActivityIndicator size="small" color={colors.primaryForeground} />
-              ) : (
-                <Text style={[s.btnText, s.btnTextPrimary]}>Refresh Config</Text>
-              )}
-            </Pressable>
-
-            {/* Current config values */}
-            {[
-              { key: "Hz Range", val: `${config.minHz} – ${config.maxHz} Hz` },
-              { key: "Remote Version", val: config.version },
-              ...(config.latestApkVersion
-                ? [{ key: "Latest APK", val: `v${config.latestApkVersion}` }]
-                : []),
-              ...(config.announcement
-                ? [{ key: "Announcement", val: config.announcement }]
-                : []),
-            ].map((item) => (
-              <View key={item.key} style={s.configItem}>
-                <Text style={s.configKey}>{item.key}</Text>
-                <Text style={s.configVal}>{item.val}</Text>
-              </View>
+        {/* ── Language ──────────────────────────────────────────── */}
+        <View>
+          <Text style={s.sectionTitle}>{t.language}</Text>
+          <View style={s.langGrid}>
+            {(Object.keys(LANG_LABELS) as LangCode[]).map((code) => (
+              <Pressable
+                key={code}
+                style={[s.langBtn, lang === code && s.langBtnActive]}
+                onPress={() => setLang(code)}
+              >
+                <Text style={[s.langBtnText, lang === code && s.langBtnTextActive]}>
+                  {LANG_LABELS[code]}
+                </Text>
+              </Pressable>
             ))}
           </View>
         </View>
 
-        {/* ── Session Logs ─────────────────────────────────────────── */}
+        {/* ── Session history ───────────────────────────────────── */}
         <View>
           <View style={s.logHeader}>
-            <Text style={s.sectionTitle}>SESSION LOGS</Text>
+            <Text style={s.sectionTitle}>{t.sessionHistory}</Text>
             <View style={s.logActions}>
-              <Pressable style={s.logActionBtn} onPress={handleRefreshLogs}>
-                <Text style={s.logActionText}>Refresh</Text>
-              </Pressable>
+              <Pressable onPress={handleRefreshLogs}><Text style={s.logAction}>{t.refresh}</Text></Pressable>
               {logs.length > 0 && (
-                <Pressable style={s.logActionBtn} onPress={handleClearLogs}>
-                  <Text style={[s.logActionText, { color: "#ef4444" }]}>Clear</Text>
+                <Pressable onPress={handleClearLogs}>
+                  <Text style={[s.logAction, { color: "#ef4444" }]}>{t.clearHistory}</Text>
                 </Pressable>
               )}
             </View>
           </View>
           <View style={s.card}>
-            {logsLoading ? (
-              <ActivityIndicator color={colors.primary} />
-            ) : logs.length === 0 ? (
-              <View style={s.emptyLogs}>
-                <Text style={s.emptyLogsText}>No sessions recorded yet</Text>
-                <Text style={[s.emptyLogsText, { marginTop: 4 }]}>
-                  Start the strobe to begin logging
-                </Text>
-              </View>
-            ) : (
-              logs.map((log, i) => (
-                <View
-                  key={log.id}
-                  style={[s.logItem, i === logs.length - 1 && { borderBottomWidth: 0 }]}
-                >
-                  <View style={s.logLeft}>
-                    <Text style={s.logMode}>
-                      {modeLabel(log.mode)}
-                      {log.pattern ? ` · ${log.pattern}` : ""}
-                    </Text>
-                    <Text style={s.logTime}>{formatTimestamp(log.timestamp)}</Text>
+            {logsLoading
+              ? <ActivityIndicator color={colors.primary} />
+              : logs.length === 0
+              ? <Text style={s.emptyText}>{t.noSessions}</Text>
+              : logs.map((log, i) => (
+                  <View
+                    key={log.id}
+                    style={[s.logItem, i === logs.length - 1 && { borderBottomWidth: 0 }]}
+                  >
+                    <View style={s.logLeft}>
+                      <Text style={s.logMode}>
+                        {log.mode === "screen" ? t.modeScreen : log.mode === "torch" ? t.modeTorch : t.modeBoth}
+                        {log.pattern ? ` · ${log.pattern}` : ""}
+                      </Text>
+                      <Text style={s.logTime}>{formatTimestamp(log.timestamp)}</Text>
+                    </View>
+                    <View style={s.logRight}>
+                      {log.hz > 0 && <Text style={s.logHz}>{log.hz.toFixed(1)} Hz</Text>}
+                      <Text style={s.logDur}>{formatDuration(log.durationMs)}</Text>
+                    </View>
                   </View>
-                  <View style={s.logRight}>
-                    {log.hz > 0 && (
-                      <Text style={s.logHz}>{log.hz.toFixed(1)} Hz</Text>
-                    )}
-                    <Text style={s.logDur}>{formatDuration(log.durationMs)}</Text>
-                  </View>
-                </View>
-              ))
-            )}
+                ))
+            }
           </View>
         </View>
 
-        {/* ── About ────────────────────────────────────────────────── */}
+        {/* ── About ─────────────────────────────────────────────── */}
         <View>
-          <Text style={s.sectionTitle}>ABOUT</Text>
+          <Text style={s.sectionTitle}>{t.about}</Text>
           <View style={s.card}>
             {[
-              { key: "App version", val: `v${APP_VERSION}` },
+              { key: t.appVersion, val: `v${APP_VERSION}` },
               {
-                key: "Platform",
-                val:
-                  Platform.OS === "android"
-                    ? "Android"
-                    : Platform.OS === "ios"
-                    ? "iOS"
-                    : "Web",
+                key: t.platform,
+                val: Platform.OS === "android" ? "Android" : Platform.OS === "ios" ? "iOS" : "Web",
               },
-              { key: "Build type", val: __DEV__ ? "Development" : "Release" },
+              { key: t.buildType, val: __DEV__ ? t.dev : t.release },
             ].map((item) => (
               <View key={item.key} style={s.aboutRow}>
                 <Text style={s.aboutKey}>{item.key}</Text>
@@ -289,6 +244,29 @@ export default function SettingsScreen() {
             ))}
           </View>
         </View>
+
+        {/* ── Legal links ────────────────────────────────────────── */}
+        <View>
+          <Text style={s.sectionTitle}>LEGAL</Text>
+          <View style={s.card}>
+            <Pressable onPress={() => Linking.openURL("flashlight-strobe://terms").catch(() => {})} style={s.legalRow}>
+              <Text style={s.legalLink}>Terms of Use</Text>
+            </Pressable>
+            <View style={s.legalDivider} />
+            <Pressable onPress={() => Linking.openURL("flashlight-strobe://privacy").catch(() => {})} style={s.legalRow}>
+              <Text style={s.legalLink}>Privacy Policy</Text>
+            </Pressable>
+          </View>
+        </View>
+
+        {/* ── Safety ─────────────────────────────────────────────── */}
+        <View>
+          <Text style={s.sectionTitle}>SAFETY</Text>
+          <Pressable style={[s.card, { alignItems: "center" }]} onPress={handleResetWarning}>
+            <Text style={[s.legalLink, { color: colors.mutedForeground }]}>{t.resetWarning}</Text>
+          </Pressable>
+        </View>
+
       </ScrollView>
     </View>
   );
@@ -301,97 +279,43 @@ function makeStyles(
   return StyleSheet.create({
     root: { flex: 1, backgroundColor: colors.background },
     scroll: { flex: 1 },
-    content: {
-      paddingHorizontal: 16,
-      paddingTop: insets.top + 16,
-      paddingBottom: insets.bottom + 100,
-      gap: 16,
-    },
-    sectionTitle: {
-      fontSize: 10,
-      fontFamily: "Inter_700Bold",
-      color: colors.mutedForeground,
-      letterSpacing: 2,
-      marginBottom: 8,
-    },
-    card: {
-      backgroundColor: colors.card,
-      borderRadius: colors.radius,
-      borderWidth: 1,
-      borderColor: colors.border,
-      padding: 16,
-      gap: 12,
-    },
-    btn: {
-      paddingVertical: 12,
-      borderRadius: colors.radius,
-      alignItems: "center",
-      backgroundColor: colors.muted,
-      borderWidth: 1,
-      borderColor: colors.border,
-    },
-    btnPrimary: { backgroundColor: colors.primary, borderColor: colors.primary },
-    btnText: { fontSize: 13, fontFamily: "Inter_600SemiBold", color: colors.foreground },
-    btnTextPrimary: { color: colors.primaryForeground },
-    statusRow: { flexDirection: "row", alignItems: "center", gap: 8 },
-    statusDot: { width: 8, height: 8, borderRadius: 4 },
-    statusText: { fontSize: 12, fontFamily: "Inter_500Medium", color: colors.mutedForeground, flex: 1 },
-    configItem: { flexDirection: "row", justifyContent: "space-between" },
-    configKey: { fontSize: 13, fontFamily: "Inter_500Medium", color: colors.mutedForeground },
-    configVal: { fontSize: 13, fontFamily: "Inter_600SemiBold", color: colors.foreground },
+    content: { paddingHorizontal: 16, paddingTop: insets.top + 16, paddingBottom: insets.bottom + 100, gap: 16 },
+    sectionTitle: { fontSize: 10, fontFamily: "Inter_700Bold", color: colors.mutedForeground, letterSpacing: 2, marginBottom: 8 },
+    card: { backgroundColor: colors.card, borderRadius: colors.radius, borderWidth: 1, borderColor: colors.border, padding: 16, gap: 12 },
 
-    // Update banner
+    // Update
     updateBanner: {
-      backgroundColor: colors.primary,
-      borderRadius: colors.radius,
-      padding: 14,
-      flexDirection: "row",
-      alignItems: "center",
-      justifyContent: "space-between",
+      backgroundColor: colors.primary, borderRadius: colors.radius, padding: 14,
+      flexDirection: "row", alignItems: "center", justifyContent: "space-between",
     },
-    updateText: {
-      fontSize: 13,
-      fontFamily: "Inter_700Bold",
-      color: colors.primaryForeground,
+    updateTitle: { fontSize: 13, fontFamily: "Inter_700Bold", color: colors.primaryForeground },
+    updateSub: { fontSize: 11, fontFamily: "Inter_400Regular", color: colors.primaryForeground, opacity: 0.85 },
+    downloadBtn: { paddingHorizontal: 14, paddingVertical: 8, backgroundColor: "rgba(0,0,0,0.2)", borderRadius: 8 },
+    downloadBtnText: { fontSize: 12, fontFamily: "Inter_700Bold", color: "#fff" },
+    updateCheckBtn: {
+      paddingVertical: 14, borderRadius: colors.radius, alignItems: "center",
     },
-    updateSub: {
-      fontSize: 11,
-      fontFamily: "Inter_400Regular",
-      color: colors.primaryForeground,
-      opacity: 0.8,
-    },
-    downloadBtn: {
-      paddingHorizontal: 14,
-      paddingVertical: 8,
-      backgroundColor: "rgba(0,0,0,0.2)",
-      borderRadius: 8,
-    },
-    downloadBtnText: { fontSize: 12, fontFamily: "Inter_700Bold", color: "#ffffff" },
+    updateCheckBtnText: { fontSize: 14, fontFamily: "Inter_600SemiBold", color: colors.primaryForeground },
+    lastChecked: { fontSize: 11, fontFamily: "Inter_400Regular", color: colors.mutedForeground, textAlign: "center", marginTop: 6 },
 
-    // Log header
-    logHeader: {
-      flexDirection: "row",
-      justifyContent: "space-between",
-      alignItems: "center",
-      marginBottom: 8,
+    // Language
+    langGrid: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+    langBtn: {
+      paddingHorizontal: 16, paddingVertical: 10,
+      backgroundColor: colors.card, borderRadius: colors.radius,
+      borderWidth: 1, borderColor: colors.border,
     },
-    logActions: { flexDirection: "row", gap: 12 },
-    logActionBtn: {},
-    logActionText: {
-      fontSize: 12,
-      fontFamily: "Inter_600SemiBold",
-      color: colors.mutedForeground,
-    },
+    langBtnActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+    langBtnText: { fontSize: 13, fontFamily: "Inter_500Medium", color: colors.foreground },
+    langBtnTextActive: { color: colors.primaryForeground, fontFamily: "Inter_600SemiBold" },
 
-    // Log items
+    // Logs
+    logHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 8 },
+    logActions: { flexDirection: "row", gap: 14 },
+    logAction: { fontSize: 12, fontFamily: "Inter_600SemiBold", color: colors.mutedForeground },
     logItem: {
-      paddingVertical: 10,
-      borderBottomWidth: 1,
-      borderBottomColor: colors.border,
-      flexDirection: "row",
-      justifyContent: "space-between",
-      alignItems: "center",
-      gap: 12,
+      paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: colors.border,
+      flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 12,
     },
     logLeft: { flex: 1, gap: 2 },
     logMode: { fontSize: 13, fontFamily: "Inter_600SemiBold", color: colors.foreground },
@@ -399,16 +323,16 @@ function makeStyles(
     logRight: { alignItems: "flex-end", gap: 2 },
     logHz: { fontSize: 13, fontFamily: "Inter_700Bold", color: colors.primary },
     logDur: { fontSize: 11, fontFamily: "Inter_400Regular", color: colors.mutedForeground },
-    emptyLogs: { paddingVertical: 20, alignItems: "center" },
-    emptyLogsText: {
-      fontSize: 13,
-      fontFamily: "Inter_400Regular",
-      color: colors.mutedForeground,
-    },
+    emptyText: { fontSize: 13, fontFamily: "Inter_400Regular", color: colors.mutedForeground, textAlign: "center", paddingVertical: 16 },
 
     // About
     aboutRow: { flexDirection: "row", justifyContent: "space-between" },
     aboutKey: { fontSize: 13, fontFamily: "Inter_400Regular", color: colors.mutedForeground },
     aboutVal: { fontSize: 13, fontFamily: "Inter_600SemiBold", color: colors.foreground },
+
+    // Legal
+    legalRow: { paddingVertical: 4 },
+    legalLink: { fontSize: 14, fontFamily: "Inter_500Medium", color: colors.primary },
+    legalDivider: { height: 1, backgroundColor: colors.border },
   });
 }

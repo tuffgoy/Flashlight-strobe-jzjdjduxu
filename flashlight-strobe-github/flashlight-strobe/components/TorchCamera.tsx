@@ -1,12 +1,13 @@
 /**
- * TorchCamera
+ * TorchCamera — controls the device torch without showing any camera preview.
  *
- * An invisible CameraView (0×0) that controls the device torch.
- * Accepts `permissionGranted` as a prop so the parent is the single
- * source of truth for camera permission state — no dual hook instances.
+ * The CameraView MUST have a non-zero size (≥ 1×1) and be laid out in the
+ * view hierarchy for Android to initialise the camera sensor and activate
+ * the torch LED.  We place it 9 999 px above the visible area so it is
+ * completely hidden while still being "real" to the hardware.
  *
- * Use the imperative ref to toggle the torch without triggering a re-render
- * of the parent component tree. Only this tiny component re-renders.
+ * Permission is owned by the parent (single source of truth) and passed
+ * as a prop so we never have two concurrent useCameraPermissions() hooks.
  */
 
 import { CameraView } from "expo-camera";
@@ -18,7 +19,6 @@ export interface TorchCameraHandle {
 }
 
 interface TorchCameraProps {
-  /** Passed from parent's useCameraPermissions() — single source of truth. */
   permissionGranted: boolean;
 }
 
@@ -26,25 +26,30 @@ export const TorchCamera = React.forwardRef<TorchCameraHandle, TorchCameraProps>
   function TorchCamera({ permissionGranted }, ref) {
     const [torchOn, setTorchOn] = useState(false);
 
-    useImperativeHandle(ref, () => ({
-      setTorch: setTorchOn,
-    }));
+    useImperativeHandle(ref, () => ({ setTorch: setTorchOn }));
 
-    // Web has no hardware torch — parent renders a screen flash overlay instead.
-    // If permission not yet granted, mount nothing (torch will be a no-op).
+    // Web has no hardware torch — parent handles screen-flash overlay.
+    // Only render when permission is granted so CameraView never shows an
+    // uninitialised camera frame to the user.
     if (Platform.OS === "web" || !permissionGranted) return null;
 
     return (
-      <CameraView style={styles.hidden} enableTorch={torchOn} facing="back" />
+      <CameraView
+        style={styles.offScreen}
+        enableTorch={torchOn}
+        facing="back"
+      />
     );
   }
 );
 
 const styles = StyleSheet.create({
-  hidden: {
+  offScreen: {
     position: "absolute",
-    width: 0,
-    height: 0,
+    width: 1,
+    height: 1,
+    top: -9999,   // well above the viewport — hardware still initialises
+    left: 0,
     opacity: 0,
   },
 });

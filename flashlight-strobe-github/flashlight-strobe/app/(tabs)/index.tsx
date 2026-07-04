@@ -1,19 +1,21 @@
 /**
- * Strobe screen — main flashlight/torch strobe controller.
+ * Strobe screen
  *
  * Performance design:
- *   - TorchCamera is an isolated forwardRef component (0×0, invisible).
- *     Only IT re-renders on each torch toggle via torchRef.current?.setTorch().
- *     The parent StrobeScreen never re-renders at strobe frequency.
- *   - Permission is managed here (single source) and passed to TorchCamera as a
- *     prop — no dual hook instances.
- *   - Drift-corrected high-res timer: polls every 2 ms using performance.now()
- *     with a catch-up while-loop so JS stalls don't cause cumulative drift.
- *   - Max Hz raised to 120.
+ *  - TorchCamera is an isolated forwardRef component (1×1 off-screen).
+ *    Only IT re-renders on each torch toggle.  Parent never re-renders
+ *    at strobe frequency.
+ *  - Modulo-based timer: samples performance.now() every 2 ms, computes
+ *    whether we're in the ON or OFF phase via elapsed % period. No drift.
+ *  - Wake lock keeps the screen on while strobing.
+ *  - Optional "screen flash" mode lights the display on every pulse
+ *    (works even without camera permission).
+ *  - Auto-stop timer cuts the strobe after a chosen duration.
  */
 
 import { useCameraPermissions } from "expo-camera";
 import * as Haptics from "expo-haptics";
+import * as KeepAwake from "expo-keep-awake";
 import React, { useEffect, useRef, useState } from "react";
 import {
   Animated,
@@ -27,42 +29,57 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { TorchCamera, TorchCameraHandle } from "@/components/TorchCamera";
+import { useLanguage } from "@/context/LanguageContext";
 import { useColors } from "@/hooks/useColors";
+import { useLogger } from "@/hooks/useLogger";
 
 const MIN_HZ = 0.5;
 const MAX_HZ = 120;
 const MIN_DUTY = 10;
 const MAX_DUTY = 90;
 
-function clamp(val: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, val));
+// Timer presets in seconds (0 = no timer)
+const TIMER_PRESETS = [0, 30, 60, 300, 600];
+
+function clamp(val: number, lo: number, hi: number) {
+  return Math.max(lo, Math.min(hi, val));
 }
 
-function hzLabel(hz: number): string {
-  if (hz < 2) return "Very Slow";
-  if (hz < 5) return "Slow";
-  if (hz < 15) return "Medium";
-  if (hz < 30) return "Fast";
-  if (hz < 60) return "Rapid";
-  return "Ultra";
+// Hz description key index: 0=VerySlowLabel 1=SlowLabel 2=MediumLabel 3=FastLabel 4=RapidLabel 5=UltraLabel
+function hzLabelKey(hz: number): 0 | 1 | 2 | 3 | 4 | 5 {
+  if (hz < 2) return 0;
+  if (hz < 5) return 1;
+  if (hz < 15) return 2;
+  if (hz < 30) return 3;
+  if (hz < 60) return 4;
+  return 5;
+}
+
+function fmtTimer(secs: number): string {
+  const m = Math.floor(secs / 60);
+  const s = secs % 60;
+  return m > 0 ? `${m}:${String(s).padStart(2, "0")}` : `${s}s`;
 }
 
 export default function StrobeScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
-  // Single source of truth for camera permission — passed as prop to TorchCamera
-  const [permission, requestPermission] = useCameraPermissions();
+  const { t } = useLanguage();
+  const { logSession } = useLogger();
 
+  const [permission, requestPermission] = useCameraPermissions();
   const [isActive, setIsActive] = useState(false);
   const [hz, setHz] = useState(10);
   const [dutyCycle, setDutyCycle] = useState(50);
+  const [screenFlash, setScreenFlash] = useState(false);
+  const [timerPresetIdx, setTimerPresetIdx] = useState(0); // index into TIMER_PRESETS
+  const [countdown, setCountdown] = useState(0);
 
-  // Refs: no state changes during strobe = no parent re-renders
   const torchRef = useRef<TorchCameraHandle>(null);
   const flashAnim = useRef(new Animated.Value(0)).current;
-  const glowAnim = useRef(new Animated.Value(0)).current;
+  const sessionStart = useRef<number | null>(null);
 
-  // ── Camera permission: request on mount (non-blocking) ─────────────────────
+  // Request camera permission on mount (non-blocking)
   useEffect(() => {
     if (!permission?.granted && permission?.canAskAgain !== false) {
       requestPermission().catch(() => {});
@@ -70,51 +87,71 @@ export default function StrobeScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // ── Wake lock ──────────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (isActive) {
+      KeepAwake.activateKeepAwakeAsync().catch(() => {});
+    } else {
+      KeepAwake.deactivateKeepAwake();
+    }
+  }, [isActive]);
+
+  // ── Auto-stop countdown ────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!isActive) {
+      setCountdown(0);
+      return;
+    }
+    const preset = TIMER_PRESETS[timerPresetIdx];
+    if (preset === 0) return;
+
+    setCountdown(preset);
+    const id = setInterval(() => {
+      setCountdown((prev) => {
+        if (prev <= 1) {
+          clearInterval(id);
+          setIsActive(false);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(id);
+  }, [isActive, timerPresetIdx]);
+
   // ── Strobe engine ──────────────────────────────────────────────────────────
-  // 2 ms polling + performance.now() + catch-up while-loop for accuracy.
-  // Only torchRef.current?.setTorch() is called — no React state → no re-renders.
+  // Uses elapsed % period to determine ON/OFF phase at any given moment.
+  // Only calls setTorch when the phase actually changes → max 1 React setState
+  // per 2 ms tick, never batched away.
   useEffect(() => {
     if (!isActive) {
       torchRef.current?.setTorch(false);
       flashAnim.setValue(0);
-      Animated.timing(glowAnim, {
-        toValue: 0,
-        duration: 300,
-        useNativeDriver: true,
-      }).start();
       return;
     }
 
-    // Glow pulse animation while active
-    Animated.loop(
-      Animated.sequence([
-        Animated.timing(glowAnim, { toValue: 1, duration: 600, useNativeDriver: true }),
-        Animated.timing(glowAnim, { toValue: 0.4, duration: 600, useNativeDriver: true }),
-      ])
-    ).start();
+    sessionStart.current = Date.now();
 
     const period = 1000 / hz;
     const onMs = period * (dutyCycle / 100);
-    const offMs = period - onMs;
+    const startTime = performance.now();
+    let lastState: boolean | null = null;
 
-    let torchState = true;
-    let nextToggle = performance.now() + onMs;
-
-    // Start with torch ON immediately
     torchRef.current?.setTorch(true);
-    if (Platform.OS === "web") flashAnim.setValue(1);
+    if (Platform.OS === "web" || screenFlash) flashAnim.setValue(1);
+    lastState = true;
 
     const id = setInterval(() => {
-      const now = performance.now();
-      // Catch-up loop: if JS stalled past multiple edges, process all of them
-      // (guard of 20 iterations prevents runaway in extreme stall scenarios)
-      let catchUp = 0;
-      while (now >= nextToggle && catchUp < 20) {
-        torchState = !torchState;
-        torchRef.current?.setTorch(torchState);
-        if (Platform.OS === "web") flashAnim.setValue(torchState ? 1 : 0);
-        nextToggle += torchState ? onMs : offMs;
-        catchUp++;
+      const elapsed = performance.now() - startTime;
+      const phase = elapsed % period;
+      const shouldBeOn = phase < onMs;
+
+      if (shouldBeOn !== lastState) {
+        lastState = shouldBeOn;
+        torchRef.current?.setTorch(shouldBeOn);
+        if (Platform.OS === "web" || screenFlash) {
+          flashAnim.setValue(shouldBeOn ? 1 : 0);
+        }
       }
     }, 2);
 
@@ -122,8 +159,23 @@ export default function StrobeScreen() {
       clearInterval(id);
       torchRef.current?.setTorch(false);
       flashAnim.setValue(0);
+      // Log session
+      if (sessionStart.current !== null) {
+        const durationMs = Date.now() - sessionStart.current;
+        if (durationMs > 2000) {
+          logSession({
+            timestamp: sessionStart.current,
+            mode: screenFlash ? (permission?.granted ? "both" : "screen") : "torch",
+            hz,
+            dutyCycle,
+            color: "#FFD700",
+            durationMs,
+          });
+        }
+        sessionStart.current = null;
+      }
     };
-  }, [isActive, hz, dutyCycle, glowAnim, flashAnim]);
+  }, [isActive, hz, dutyCycle, screenFlash, flashAnim, logSession, permission?.granted]);
 
   const handleToggle = async () => {
     await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
@@ -132,66 +184,57 @@ export default function StrobeScreen() {
 
   const adjustHz = (delta: number) =>
     setHz((prev) => clamp(parseFloat((prev + delta).toFixed(1)), MIN_HZ, MAX_HZ));
-
   const adjustDuty = (delta: number) =>
     setDutyCycle((prev) => clamp(prev + delta, MIN_DUTY, MAX_DUTY));
 
-  const glowOpacity = glowAnim.interpolate({
-    inputRange: [0, 1],
-    outputRange: [0, 0.6],
-  });
+  const timerPreset = TIMER_PRESETS[timerPresetIdx];
 
   const styles = makeStyles(colors, insets);
 
   return (
     <View style={styles.root}>
-      {/* Web: full-screen flash overlay (no real torch on web) */}
-      {Platform.OS === "web" && (
-        <Animated.View
-          pointerEvents="none"
-          style={[styles.flashOverlay, { opacity: flashAnim }]}
-        />
-      )}
+      {/* Screen flash overlay — active on all platforms when screenFlash on */}
+      <Animated.View
+        pointerEvents="none"
+        style={[styles.flashOverlay, { opacity: flashAnim }]}
+      />
 
-      {/* Native: 0×0 invisible camera for torch control */}
+      {/* 1×1 off-screen camera — drives hardware torch */}
       <TorchCamera ref={torchRef} permissionGranted={permission?.granted ?? false} />
 
       <ScrollView
         contentContainerStyle={styles.scroll}
         showsVerticalScrollIndicator={false}
       >
-        <Text style={styles.titleLabel}>STROBE</Text>
+        <Text style={styles.sectionLabel}>{t.strobe}</Text>
 
-        {/* Main toggle button */}
+        {/* ── Main toggle button ─────────────────────────────────── */}
         <View style={styles.buttonWrap}>
-          <Animated.View style={[styles.glowRing, { opacity: glowOpacity }]} />
           <Pressable
-            style={[styles.mainButton, isActive && styles.mainButtonActive]}
+            style={[styles.mainBtn, isActive && styles.mainBtnActive]}
             onPress={handleToggle}
             testID="strobe-toggle"
           >
-            <Text style={[styles.buttonIcon, isActive && styles.buttonIconActive]}>
-              ⚡
+            <Text style={styles.btnIcon}>⚡</Text>
+            <Text style={[styles.btnLabel, isActive && styles.btnLabelActive]}>
+              {isActive ? t.on : t.off}
             </Text>
-            <Text style={[styles.buttonLabel, isActive && styles.buttonLabelActive]}>
-              {isActive ? "ON" : "OFF"}
-            </Text>
+            {isActive && countdown > 0 && (
+              <Text style={styles.countdownText}>{fmtTimer(countdown)}</Text>
+            )}
           </Pressable>
         </View>
 
-        {/* Hz control */}
+        {/* ── Frequency ──────────────────────────────────────────── */}
         <View style={styles.card}>
-          <Text style={styles.cardTitle}>FREQUENCY</Text>
-          <Text style={styles.bigValue}>{hz.toFixed(1)} Hz</Text>
-          <Text style={styles.subText}>{hzLabel(hz)}</Text>
+          <Text style={styles.cardLabel}>{t.frequency}</Text>
+          <Text style={styles.bigVal}>{hz.toFixed(1)} Hz</Text>
+          <Text style={styles.subText}>{
+            [t.hzVerySlowLabel, t.hzSlowLabel, t.hzMediumLabel, t.hzFastLabel, t.hzRapidLabel, t.hzUltraLabel][hzLabelKey(hz)]
+          }</Text>
 
           <View style={styles.sliderTrack}>
-            <View
-              style={[
-                styles.sliderFill,
-                { width: `${((hz - MIN_HZ) / (MAX_HZ - MIN_HZ)) * 100}%` as any },
-              ]}
-            />
+            <View style={[styles.sliderFill, { width: `${((hz - MIN_HZ) / (MAX_HZ - MIN_HZ)) * 100}%` as any }]} />
           </View>
 
           <View style={styles.adjRow}>
@@ -208,7 +251,6 @@ export default function StrobeScreen() {
             ))}
           </View>
 
-          {/* Hz presets — extended to 120 */}
           <View style={styles.presetRow}>
             {[1, 5, 10, 20, 30, 60, 120].map((v) => (
               <Pressable
@@ -216,29 +258,20 @@ export default function StrobeScreen() {
                 style={[styles.presetBtn, hz === v && styles.presetBtnActive]}
                 onPress={() => setHz(v)}
               >
-                <Text style={[styles.presetText, hz === v && styles.presetTextActive]}>
-                  {v}
-                </Text>
+                <Text style={[styles.presetText, hz === v && styles.presetTextActive]}>{v}</Text>
               </Pressable>
             ))}
           </View>
         </View>
 
-        {/* Duty cycle */}
+        {/* ── Duty cycle ─────────────────────────────────────────── */}
         <View style={styles.card}>
-          <Text style={styles.cardTitle}>DUTY CYCLE</Text>
-          <Text style={styles.bigValue}>{dutyCycle}%</Text>
-          <Text style={styles.subText}>Flash on-time per cycle</Text>
+          <Text style={styles.cardLabel}>{t.dutyCycle}</Text>
+          <Text style={styles.bigVal}>{dutyCycle}%</Text>
+          <Text style={styles.subText}>{t.flashOnTime}</Text>
 
           <View style={styles.sliderTrack}>
-            <View
-              style={[
-                styles.sliderFill,
-                {
-                  width: `${((dutyCycle - MIN_DUTY) / (MAX_DUTY - MIN_DUTY)) * 100}%` as any,
-                },
-              ]}
-            />
+            <View style={[styles.sliderFill, { width: `${((dutyCycle - MIN_DUTY) / (MAX_DUTY - MIN_DUTY)) * 100}%` as any }]} />
           </View>
 
           <View style={styles.adjRow}>
@@ -262,47 +295,72 @@ export default function StrobeScreen() {
                 style={[styles.presetBtn, dutyCycle === v && styles.presetBtnActive]}
                 onPress={() => setDutyCycle(v)}
               >
-                <Text
-                  style={[styles.presetText, dutyCycle === v && styles.presetTextActive]}
-                >
-                  {v}%
+                <Text style={[styles.presetText, dutyCycle === v && styles.presetTextActive]}>{v}%</Text>
+              </Pressable>
+            ))}
+          </View>
+        </View>
+
+        {/* ── Screen flash toggle ─────────────────────────────────── */}
+        <Pressable
+          style={[styles.card, styles.toggleRow]}
+          onPress={() => setScreenFlash((prev) => !prev)}
+        >
+          <View style={{ flex: 1 }}>
+            <Text style={styles.cardLabel}>{t.screenFlash}</Text>
+            <Text style={styles.subText}>{t.screenFlashSub}</Text>
+          </View>
+          <View style={[styles.toggle, screenFlash && styles.toggleOn]}>
+            <View style={[styles.toggleKnob, screenFlash && styles.toggleKnobOn]} />
+          </View>
+        </Pressable>
+
+        {/* ── Auto-stop timer ─────────────────────────────────────── */}
+        <View style={styles.card}>
+          <Text style={styles.cardLabel}>{t.timer}</Text>
+          <Text style={styles.bigVal}>
+            {timerPreset === 0 ? t.noTimer : fmtTimer(timerPreset)}
+          </Text>
+          {isActive && countdown > 0 && (
+            <Text style={styles.subText}>{fmtTimer(countdown)} remaining</Text>
+          )}
+          <View style={styles.presetRow}>
+            {TIMER_PRESETS.map((v, i) => (
+              <Pressable
+                key={v}
+                style={[styles.presetBtn, timerPresetIdx === i && styles.presetBtnActive]}
+                onPress={() => setTimerPresetIdx(i)}
+              >
+                <Text style={[styles.presetText, timerPresetIdx === i && styles.presetTextActive]}>
+                  {v === 0 ? "Off" : v < 60 ? `${v}s` : `${v / 60}m`}
                 </Text>
               </Pressable>
             ))}
           </View>
         </View>
 
-        {/* Status row */}
-        <View style={styles.statusRow}>
-          <View style={styles.statItem}>
-            <Text style={styles.statValue}>{hz.toFixed(1)}</Text>
-            <Text style={styles.statLabel}>Hz</Text>
-          </View>
-          <View style={styles.statDivider} />
-          <View style={styles.statItem}>
-            <Text style={styles.statValue}>{dutyCycle}</Text>
-            <Text style={styles.statLabel}>DUTY%</Text>
-          </View>
-          <View style={styles.statDivider} />
-          <View style={styles.statItem}>
-            <Text style={styles.statValue}>{(1000 / hz).toFixed(0)}</Text>
-            <Text style={styles.statLabel}>ms/CYCLE</Text>
-          </View>
-          <View style={styles.statDivider} />
-          <View style={styles.statItem}>
-            <Text style={styles.statValue}>
-              {((1000 / hz) * (dutyCycle / 100)).toFixed(0)}
-            </Text>
-            <Text style={styles.statLabel}>ms ON</Text>
-          </View>
+        {/* ── Stats row ──────────────────────────────────────────── */}
+        <View style={styles.statsRow}>
+          {[
+            { val: hz.toFixed(1), lbl: "Hz" },
+            { val: `${dutyCycle}`, lbl: "DUTY%" },
+            { val: `${(1000 / hz).toFixed(0)}`, lbl: t.msCycle },
+            { val: `${((1000 / hz) * (dutyCycle / 100)).toFixed(0)}`, lbl: t.msOn },
+          ].map((item, i, arr) => (
+            <React.Fragment key={item.lbl}>
+              <View style={styles.statItem}>
+                <Text style={styles.statVal}>{item.val}</Text>
+                <Text style={styles.statLbl}>{item.lbl}</Text>
+              </View>
+              {i < arr.length - 1 && <View style={styles.statDiv} />}
+            </React.Fragment>
+          ))}
         </View>
 
-        {/* Camera permission button (non-blocking, shown only if denied) */}
+        {/* Permission button (only shown if denied) */}
         {Platform.OS !== "web" && !permission?.granted && (
           <Pressable style={styles.permBtn} onPress={() => requestPermission()}>
-            <Text style={styles.permBtnText}>
-              Grant Camera Permission for Torch
-            </Text>
+            <Text style={styles.permBtnText}>{t.grantPermission}</Text>
           </Pressable>
         )}
       </ScrollView>
@@ -320,6 +378,7 @@ function makeStyles(
       ...StyleSheet.absoluteFillObject,
       backgroundColor: "#ffffff",
       zIndex: 10,
+      pointerEvents: "none",
     },
     scroll: {
       paddingHorizontal: 16,
@@ -328,7 +387,7 @@ function makeStyles(
       alignItems: "center",
       gap: 16,
     },
-    titleLabel: {
+    sectionLabel: {
       fontSize: 10,
       fontFamily: "Inter_700Bold",
       color: colors.mutedForeground,
@@ -342,14 +401,7 @@ function makeStyles(
       justifyContent: "center",
       marginVertical: 8,
     },
-    glowRing: {
-      position: "absolute",
-      width: 200,
-      height: 200,
-      borderRadius: 100,
-      backgroundColor: colors.primary,
-    },
-    mainButton: {
+    mainBtn: {
       width: 150,
       height: 150,
       borderRadius: 75,
@@ -358,21 +410,26 @@ function makeStyles(
       borderColor: colors.border,
       alignItems: "center",
       justifyContent: "center",
-      gap: 4,
+      gap: 2,
     },
-    mainButtonActive: {
+    mainBtnActive: {
       backgroundColor: colors.primary,
       borderColor: colors.primary,
     },
-    buttonIcon: { fontSize: 36 },
-    buttonIconActive: {},
-    buttonLabel: {
+    btnIcon: { fontSize: 36 },
+    btnLabel: {
       fontSize: 14,
       fontFamily: "Inter_700Bold",
       color: colors.foreground,
       letterSpacing: 2,
     },
-    buttonLabelActive: { color: colors.primaryForeground },
+    btnLabelActive: { color: colors.primaryForeground },
+    countdownText: {
+      fontSize: 11,
+      fontFamily: "Inter_500Medium",
+      color: colors.primaryForeground,
+      opacity: 0.8,
+    },
     card: {
       width: "100%",
       backgroundColor: colors.card,
@@ -382,13 +439,17 @@ function makeStyles(
       padding: 16,
       gap: 10,
     },
-    cardTitle: {
+    toggleRow: {
+      flexDirection: "row",
+      alignItems: "center",
+    },
+    cardLabel: {
       fontSize: 10,
       fontFamily: "Inter_700Bold",
       color: colors.mutedForeground,
       letterSpacing: 2,
     },
-    bigValue: {
+    bigVal: {
       fontSize: 36,
       fontFamily: "Inter_700Bold",
       color: colors.foreground,
@@ -448,7 +509,25 @@ function makeStyles(
       color: colors.primaryForeground,
       fontFamily: "Inter_600SemiBold",
     },
-    statusRow: {
+    toggle: {
+      width: 48,
+      height: 28,
+      borderRadius: 14,
+      backgroundColor: colors.muted,
+      borderWidth: 1,
+      borderColor: colors.border,
+      justifyContent: "center",
+      paddingHorizontal: 2,
+    },
+    toggleOn: { backgroundColor: colors.primary, borderColor: colors.primary },
+    toggleKnob: {
+      width: 22,
+      height: 22,
+      borderRadius: 11,
+      backgroundColor: colors.mutedForeground,
+    },
+    toggleKnobOn: { alignSelf: "flex-end", backgroundColor: colors.primaryForeground },
+    statsRow: {
       flexDirection: "row",
       backgroundColor: colors.card,
       borderRadius: colors.radius,
@@ -457,24 +536,15 @@ function makeStyles(
       overflow: "hidden",
       width: "100%",
     },
-    statItem: {
-      flex: 1,
-      paddingVertical: 16,
-      alignItems: "center",
-      gap: 4,
-    },
-    statValue: {
-      fontSize: 18,
-      fontFamily: "Inter_700Bold",
-      color: colors.foreground,
-    },
-    statLabel: {
+    statItem: { flex: 1, paddingVertical: 16, alignItems: "center", gap: 4 },
+    statVal: { fontSize: 18, fontFamily: "Inter_700Bold", color: colors.foreground },
+    statLbl: {
       fontSize: 9,
       fontFamily: "Inter_400Regular",
       color: colors.mutedForeground,
       letterSpacing: 1,
     },
-    statDivider: { width: 1, backgroundColor: colors.border },
+    statDiv: { width: 1, backgroundColor: colors.border },
     permBtn: {
       width: "100%",
       paddingVertical: 14,
