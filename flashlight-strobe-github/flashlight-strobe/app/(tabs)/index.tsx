@@ -79,6 +79,14 @@ export default function StrobeScreen() {
   const flashAnim = useRef(new Animated.Value(0)).current;
   const sessionStart = useRef<number | null>(null);
 
+  // Refs that the strobe engine reads without being in its dependency array.
+  // This prevents the engine from restarting mid-flash when permission resolves
+  // (undefined → granted) or when logSession gets a new function reference.
+  const permissionGrantedRef = useRef(permission?.granted ?? false);
+  permissionGrantedRef.current = permission?.granted ?? false;
+  const logSessionRef = useRef(logSession);
+  logSessionRef.current = logSession;
+
   // Request camera permission on mount (non-blocking)
   useEffect(() => {
     if (!permission?.granted && permission?.canAskAgain !== false) {
@@ -161,13 +169,13 @@ export default function StrobeScreen() {
       clearInterval(id);
       torchRef.current?.setTorch(false);
       flashAnim.setValue(0);
-      // Log session
+      // Log session — read via refs so this closure never goes stale
       if (sessionStart.current !== null) {
         const durationMs = Date.now() - sessionStart.current;
         if (durationMs > 2000) {
-          logSession({
+          logSessionRef.current({
             timestamp: sessionStart.current,
-            mode: screenFlash ? (permission?.granted ? "both" : "screen") : "torch",
+            mode: screenFlash ? (permissionGrantedRef.current ? "both" : "screen") : "torch",
             hz,
             dutyCycle,
             color: "#FFD700",
@@ -177,7 +185,10 @@ export default function StrobeScreen() {
         sessionStart.current = null;
       }
     };
-  }, [isActive, hz, dutyCycle, screenFlash, flashAnim, logSession, permission?.granted]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isActive, hz, dutyCycle, screenFlash, flashAnim]);
+  // NOTE: logSession and permission?.granted are intentionally excluded —
+  // they update via refs above so the engine never restarts mid-flash.
 
   const handleToggle = async () => {
     await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);

@@ -30,7 +30,7 @@ import { RemoteConfigProvider } from "@/context/RemoteConfigContext";
 import { LanguageProvider } from "@/context/LanguageContext";
 
 // ── App version (keep in sync with app.json) ─────────────────────────────────
-const APP_VERSION = "1.1.0";
+const APP_VERSION = "1.3.0";
 
 // ── Supabase REST API (read-only, no library needed) ─────────────────────────
 const SUPABASE_URL = "https://vdprpaqlerngvcmzwcjg.supabase.co";
