@@ -13,6 +13,7 @@
  *  - Auto-stop timer cuts the strobe after a chosen duration.
  */
 
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useCameraPermissions } from "expo-camera";
 import * as Haptics from "expo-haptics";
 import * as KeepAwake from "expo-keep-awake";
@@ -68,21 +69,28 @@ export default function StrobeScreen() {
   const [permission, requestPermission] = useCameraPermissions();
   const [isActive, setIsActive] = useState(false);
   const [hz, setHz] = useState(10);
-  const [screenFlash, setScreenFlash] = useState(false);
-  const [timerPresetIdx, setTimerPresetIdx] = useState(0); // index into TIMER_PRESETS
+  // "torch" = LED only  |  "screen" = display flash only  |  "both" = LED + screen
+  const [flashMode, setFlashMode] = useState<"torch" | "screen" | "both">("torch");
+  const [timerPresetIdx, setTimerPresetIdx] = useState(0);
   const [countdown, setCountdown] = useState(0);
 
   const torchRef = useRef<TorchCameraHandle>(null);
   const flashAnim = useRef(new Animated.Value(0)).current;
   const sessionStart = useRef<number | null>(null);
 
-  // Refs that the strobe engine reads without being in its dependency array.
-  // This prevents the engine from restarting mid-flash when permission resolves
-  // (undefined → granted) or when logSession gets a new function reference.
-  const permissionGrantedRef = useRef(permission?.granted ?? false);
-  permissionGrantedRef.current = permission?.granted ?? false;
+  // logSession ref — updated every render so the strobe cleanup never goes stale
   const logSessionRef = useRef(logSession);
   logSessionRef.current = logSession;
+
+  // ── Persist flash mode ─────────────────────────────────────────────────────
+  useEffect(() => {
+    AsyncStorage.getItem("strobe_flash_mode").then((v) => {
+      if (v === "torch" || v === "screen" || v === "both") setFlashMode(v);
+    }).catch(() => {});
+  }, []);
+  useEffect(() => {
+    AsyncStorage.setItem("strobe_flash_mode", flashMode).catch(() => {});
+  }, [flashMode]);
 
   // Request camera permission on mount (non-blocking)
   useEffect(() => {
@@ -99,27 +107,18 @@ export default function StrobeScreen() {
     } else {
       KeepAwake.deactivateKeepAwake();
     }
-    // Ensure wake lock is released on unmount regardless of isActive state
     return () => { KeepAwake.deactivateKeepAwake(); };
   }, [isActive]);
 
   // ── Auto-stop countdown ────────────────────────────────────────────────────
   useEffect(() => {
-    if (!isActive) {
-      setCountdown(0);
-      return;
-    }
+    if (!isActive) { setCountdown(0); return; }
     const preset = TIMER_PRESETS[timerPresetIdx];
     if (preset === 0) return;
-
     setCountdown(preset);
     const id = setInterval(() => {
       setCountdown((prev) => {
-        if (prev <= 1) {
-          clearInterval(id);
-          setIsActive(false);
-          return 0;
-        }
+        if (prev <= 1) { clearInterval(id); setIsActive(false); return 0; }
         return prev - 1;
       });
     }, 1000);
@@ -127,9 +126,12 @@ export default function StrobeScreen() {
   }, [isActive, timerPresetIdx]);
 
   // ── Strobe engine ──────────────────────────────────────────────────────────
-  // Uses elapsed % period to determine ON/OFF phase at any given moment.
-  // Only calls setTorch when the phase actually changes → max 1 React setState
-  // per 2 ms tick, never batched away.
+  // setTimeout chain — each toggle schedules exactly one next toggle after
+  // halfPeriod ms. This is far more reliable than setInterval polling because:
+  //   • No missed transitions: every ON→OFF and OFF→ON is its own scheduled event
+  //   • No batching: each setTimeout fires independently; React can't coalesce them
+  //   • No phase drift: the chain self-corrects around JS thread delays
+  //   • Instant start: tick(true) fires synchronously before the first timeout
   useEffect(() => {
     if (!isActive) {
       torchRef.current?.setTorch(false);
@@ -139,40 +141,33 @@ export default function StrobeScreen() {
 
     sessionStart.current = Date.now();
 
-    const period = 1000 / hz;
-    const halfPeriod = period / 2; // pure 50/50 — flash on, flash off, repeat
-    const startTime = performance.now();
-    let lastState: boolean | null = null;
+    const halfPeriod = (1000 / hz) / 2;
+    const useTorch = flashMode !== "screen";
+    const useScreen = flashMode !== "torch" || Platform.OS === "web";
 
-    torchRef.current?.setTorch(true);
-    if (Platform.OS === "web" || screenFlash) flashAnim.setValue(1);
-    lastState = true;
+    let timeoutId: ReturnType<typeof setTimeout>;
+    let alive = true;
 
-    const id = setInterval(() => {
-      const elapsed = performance.now() - startTime;
-      const phase = elapsed % period;
-      const shouldBeOn = phase < halfPeriod;
+    function tick(on: boolean) {
+      if (!alive) return;
+      if (useTorch) torchRef.current?.setTorch(on);
+      if (useScreen) flashAnim.setValue(on ? 1 : 0);
+      timeoutId = setTimeout(() => tick(!on), halfPeriod);
+    }
 
-      if (shouldBeOn !== lastState) {
-        lastState = shouldBeOn;
-        torchRef.current?.setTorch(shouldBeOn);
-        if (Platform.OS === "web" || screenFlash) {
-          flashAnim.setValue(shouldBeOn ? 1 : 0);
-        }
-      }
-    }, 2);
+    tick(true); // start immediately — no leading delay
 
     return () => {
-      clearInterval(id);
-      torchRef.current?.setTorch(false);
+      alive = false;
+      clearTimeout(timeoutId);
+      if (useTorch) torchRef.current?.setTorch(false);
       flashAnim.setValue(0);
-      // Log session — read via refs so this closure never goes stale
       if (sessionStart.current !== null) {
         const durationMs = Date.now() - sessionStart.current;
         if (durationMs > 2000) {
           logSessionRef.current({
             timestamp: sessionStart.current,
-            mode: screenFlash ? (permissionGrantedRef.current ? "both" : "screen") : "torch",
+            mode: flashMode,
             hz,
             dutyCycle: 50,
             color: "#FFD700",
@@ -183,12 +178,12 @@ export default function StrobeScreen() {
       }
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isActive, hz, screenFlash, flashAnim]);
-  // NOTE: logSession and permission?.granted are intentionally excluded —
-  // they update via refs above so the engine never restarts mid-flash.
+  }, [isActive, hz, flashMode, flashAnim]);
 
-  const handleToggle = async () => {
-    await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
+  // Fire-and-forget haptics — do NOT await, or the 200-700ms vibration
+  // completion delay becomes visible as lag before the strobe starts.
+  const handleToggle = () => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
     setIsActive((prev) => !prev);
   };
 
@@ -272,19 +267,33 @@ export default function StrobeScreen() {
           </View>
         </View>
 
-        {/* ── Screen flash toggle ─────────────────────────────────── */}
-        <Pressable
-          style={[styles.card, styles.toggleRow]}
-          onPress={() => setScreenFlash((prev) => !prev)}
-        >
-          <View style={{ flex: 1 }}>
-            <Text style={styles.cardLabel}>{t.screenFlash}</Text>
-            <Text style={styles.subText}>{t.screenFlashSub}</Text>
+        {/* ── Flash mode selector ─────────────────────────────────── */}
+        <View style={styles.card}>
+          <Text style={styles.cardLabel}>FLASH MODE</Text>
+          <View style={styles.modeRow}>
+            {(["torch", "screen", "both"] as const).map((mode) => (
+              <Pressable
+                key={mode}
+                style={[styles.modeBtn, flashMode === mode && styles.modeBtnActive]}
+                onPress={() => setFlashMode(mode)}
+              >
+                <Text style={styles.modeIcon}>
+                  {mode === "torch" ? "🔦" : mode === "screen" ? "📱" : "⚡"}
+                </Text>
+                <Text style={[styles.modeLbl, flashMode === mode && styles.modeLblActive]}>
+                  {mode === "torch" ? "Torch" : mode === "screen" ? "Screen" : "Both"}
+                </Text>
+              </Pressable>
+            ))}
           </View>
-          <View style={[styles.toggle, screenFlash && styles.toggleOn]}>
-            <View style={[styles.toggleKnob, screenFlash && styles.toggleKnobOn]} />
-          </View>
-        </Pressable>
+          <Text style={styles.subText}>
+            {flashMode === "torch"
+              ? "Flashlight LED only"
+              : flashMode === "screen"
+              ? "Screen flash only — no camera needed"
+              : "Flashlight LED + screen together"}
+          </Text>
+        </View>
 
         {/* ── Auto-stop timer ─────────────────────────────────────── */}
         <View style={styles.card}>
@@ -498,6 +507,26 @@ function makeStyles(
       backgroundColor: colors.mutedForeground,
     },
     toggleKnobOn: { alignSelf: "flex-end", backgroundColor: colors.primaryForeground },
+    modeRow: { flexDirection: "row", gap: 8 },
+    modeBtn: {
+      flex: 1,
+      paddingVertical: 12,
+      alignItems: "center",
+      gap: 4,
+      backgroundColor: colors.muted,
+      borderRadius: colors.radius - 2,
+      borderWidth: 1,
+      borderColor: colors.border,
+    },
+    modeBtnActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+    modeIcon: { fontSize: 20 },
+    modeLbl: {
+      fontSize: 11,
+      fontFamily: "Inter_600SemiBold",
+      color: colors.mutedForeground,
+      letterSpacing: 0.5,
+    },
+    modeLblActive: { color: colors.primaryForeground },
     statsRow: {
       flexDirection: "row",
       backgroundColor: colors.card,
