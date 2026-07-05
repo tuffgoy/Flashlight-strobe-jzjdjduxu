@@ -1,15 +1,26 @@
 /**
- * Strobe screen
+ * StrobeScreen — main strobe/flashlight tab.
+ *
+ * Flash modes:
+ *  - "torch"  → LED flashlight only
+ *  - "screen" → display flash only (works without camera permission)
+ *  - "both"   → LED + screen together
+ *
+ * Screen flash area (persisted in AsyncStorage):
+ *  - "safearea"   → flash overlay covers only the content area above the tab bar
+ *  - "fullscreen" → flash overlay covers the entire screen including the tab bar
+ *                   (rendered at the root layout level via FullscreenFlashContext)
+ *
+ * Hz slider:
+ *  - Drag left/right to set frequency, or tap the +/- buttons / presets
  *
  * Performance design:
  *  - TorchCamera is an isolated forwardRef component (1×1 off-screen).
  *    Only IT re-renders on each torch toggle.  Parent never re-renders
  *    at strobe frequency.
- *  - Modulo-based timer: samples performance.now() every 2 ms, computes
- *    whether we're in the ON or OFF phase via elapsed % period. No drift.
+ *  - setTimeout chain: each ON→OFF and OFF→ON is a separate scheduled event;
+ *    no batching, no phase drift.
  *  - Wake lock keeps the screen on while strobing.
- *  - Optional "screen flash" mode lights the display on every pulse
- *    (works even without camera permission).
  *  - Auto-stop timer cuts the strobe after a chosen duration.
  */
 
@@ -20,6 +31,7 @@ import * as KeepAwake from "expo-keep-awake";
 import React, { useEffect, useRef, useState } from "react";
 import {
   Animated,
+  PanResponder,
   Platform,
   Pressable,
   ScrollView,
@@ -30,6 +42,7 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { TorchCamera, TorchCameraHandle } from "@/components/TorchCamera";
+import { useFullscreenFlash } from "@/context/FullscreenFlashContext";
 import { useLanguage } from "@/context/LanguageContext";
 import { useColors } from "@/hooks/useColors";
 import { useLogger } from "@/hooks/useLogger";
@@ -73,6 +86,7 @@ export default function StrobeScreen() {
   const [flashMode, setFlashMode] = useState<"torch" | "screen" | "both">("torch");
   const [timerPresetIdx, setTimerPresetIdx] = useState(0);
   const [countdown, setCountdown] = useState(0);
+  const [screenFlashArea, setScreenFlashArea] = useState<"fullscreen" | "safearea">("safearea");
 
   const torchRef = useRef<TorchCameraHandle>(null);
   const flashAnim = useRef(new Animated.Value(0)).current;
@@ -81,6 +95,32 @@ export default function StrobeScreen() {
   // logSession ref — updated every render so the strobe cleanup never goes stale
   const logSessionRef = useRef(logSession);
   logSessionRef.current = logSession;
+
+  // Fullscreen flash context — controlled from root layout
+  const { flashAnim: fullscreenFlashAnim } = useFullscreenFlash();
+
+  // Track fullscreen mode in a ref so the strobe closure always reads latest value
+  const isFullscreenRef = useRef(false);
+
+  // ── Hz slider ──────────────────────────────────────────────────────────────
+  const sliderWidth = useRef(1);
+
+  const sliderPan = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onPanResponderGrant: (evt) => {
+        const x = evt.nativeEvent.locationX;
+        const ratio = Math.max(0, Math.min(1, x / sliderWidth.current));
+        setHz(parseFloat((MIN_HZ + ratio * (MAX_HZ - MIN_HZ)).toFixed(1)));
+      },
+      onPanResponderMove: (evt) => {
+        const x = evt.nativeEvent.locationX;
+        const ratio = Math.max(0, Math.min(1, x / sliderWidth.current));
+        setHz(parseFloat((MIN_HZ + ratio * (MAX_HZ - MIN_HZ)).toFixed(1)));
+      },
+    })
+  ).current;
 
   // ── Persist flash mode ─────────────────────────────────────────────────────
   useEffect(() => {
@@ -91,6 +131,20 @@ export default function StrobeScreen() {
   useEffect(() => {
     AsyncStorage.setItem("strobe_flash_mode", flashMode).catch(() => {});
   }, [flashMode]);
+
+  // ── Persist screen flash area ──────────────────────────────────────────────
+  useEffect(() => {
+    AsyncStorage.getItem("strobe_screen_flash_area").then((v) => {
+      if (v === "fullscreen" || v === "safearea") setScreenFlashArea(v);
+    }).catch(() => {});
+  }, []);
+  useEffect(() => {
+    isFullscreenRef.current = screenFlashArea === "fullscreen";
+    // When switching modes, immediately clear both overlays
+    flashAnim.setValue(0);
+    fullscreenFlashAnim.setValue(0);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [screenFlashArea]);
 
   // Request camera permission on mount (non-blocking)
   useEffect(() => {
@@ -132,10 +186,15 @@ export default function StrobeScreen() {
   //   • No batching: each setTimeout fires independently; React can't coalesce them
   //   • No phase drift: the chain self-corrects around JS thread delays
   //   • Instant start: tick(true) fires synchronously before the first timeout
+  //
+  // Screen flash routing: reads isFullscreenRef at each tick (no closure stale).
+  //   - fullscreen mode → sets fullscreenFlashAnim (root overlay, covers tab bar)
+  //   - safearea mode   → sets local flashAnim (covers content area only)
   useEffect(() => {
     if (!isActive) {
       torchRef.current?.setTorch(false);
       flashAnim.setValue(0);
+      fullscreenFlashAnim.setValue(0);
       return;
     }
 
@@ -151,7 +210,16 @@ export default function StrobeScreen() {
     function tick(on: boolean) {
       if (!alive) return;
       if (useTorch) torchRef.current?.setTorch(on);
-      if (useScreen) flashAnim.setValue(on ? 1 : 0);
+      if (useScreen) {
+        const val = on ? 1 : 0;
+        if (isFullscreenRef.current) {
+          fullscreenFlashAnim.setValue(val);
+          flashAnim.setValue(0);
+        } else {
+          flashAnim.setValue(val);
+          fullscreenFlashAnim.setValue(0);
+        }
+      }
       timeoutId = setTimeout(() => tick(!on), halfPeriod);
     }
 
@@ -162,6 +230,7 @@ export default function StrobeScreen() {
       clearTimeout(timeoutId);
       if (useTorch) torchRef.current?.setTorch(false);
       flashAnim.setValue(0);
+      fullscreenFlashAnim.setValue(0);
       if (sessionStart.current !== null) {
         const durationMs = Date.now() - sessionStart.current;
         if (durationMs > 2000) {
@@ -178,7 +247,7 @@ export default function StrobeScreen() {
       }
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isActive, hz, flashMode, flashAnim]);
+  }, [isActive, hz, flashMode, flashAnim, fullscreenFlashAnim]);
 
   // Fire-and-forget haptics — do NOT await, or the 200-700ms vibration
   // completion delay becomes visible as lag before the strobe starts.
@@ -193,10 +262,11 @@ export default function StrobeScreen() {
   const timerPreset = TIMER_PRESETS[timerPresetIdx];
 
   const styles = makeStyles(colors, insets);
+  const fillPct = `${((hz - MIN_HZ) / (MAX_HZ - MIN_HZ)) * 100}%` as any;
 
   return (
     <View style={styles.root}>
-      {/* Screen flash overlay — active on all platforms when screenFlash on */}
+      {/* Screen flash overlay — safe-area mode: covers content above tab bar */}
       <Animated.View
         pointerEvents="none"
         style={[styles.flashOverlay, { opacity: flashAnim }]}
@@ -236,8 +306,15 @@ export default function StrobeScreen() {
             [t.hzVerySlowLabel, t.hzSlowLabel, t.hzMediumLabel, t.hzFastLabel, t.hzRapidLabel, t.hzUltraLabel][hzLabelKey(hz)]
           }</Text>
 
-          <View style={styles.sliderTrack}>
-            <View style={[styles.sliderFill, { width: `${((hz - MIN_HZ) / (MAX_HZ - MIN_HZ)) * 100}%` as any }]} />
+          {/* Swipeable slider track — drag left/right to change Hz */}
+          <View
+            style={styles.sliderTrack}
+            onLayout={(e) => { sliderWidth.current = e.nativeEvent.layout.width || 1; }}
+            hitSlop={{ top: 16, bottom: 16 }}
+            {...sliderPan.panHandlers}
+          >
+            <View style={[styles.sliderFill, { width: fillPct }]} />
+            <View style={[styles.sliderThumb, { left: fillPct }]} />
           </View>
 
           <View style={styles.adjRow}>
@@ -290,7 +367,7 @@ export default function StrobeScreen() {
             {flashMode === "torch"
               ? "Flashlight LED only"
               : flashMode === "screen"
-              ? "Screen flash only — no camera needed"
+              ? `Screen flash only — ${screenFlashArea === "fullscreen" ? "full screen" : "above navigation"}`
               : "Flashlight LED + screen together"}
           </Text>
         </View>
@@ -419,10 +496,6 @@ function makeStyles(
       padding: 16,
       gap: 10,
     },
-    toggleRow: {
-      flexDirection: "row",
-      alignItems: "center",
-    },
     cardLabel: {
       fontSize: 10,
       fontFamily: "Inter_700Bold",
@@ -441,15 +514,28 @@ function makeStyles(
     },
     sliderTrack: {
       width: "100%",
-      height: 4,
+      height: 8,
       backgroundColor: colors.muted,
-      borderRadius: 2,
-      overflow: "hidden",
+      borderRadius: 4,
+      overflow: "visible",
+      justifyContent: "center",
     },
     sliderFill: {
       height: "100%",
       backgroundColor: colors.primary,
-      borderRadius: 2,
+      borderRadius: 4,
+    },
+    sliderThumb: {
+      position: "absolute",
+      width: 20,
+      height: 20,
+      borderRadius: 10,
+      backgroundColor: colors.primary,
+      borderWidth: 3,
+      borderColor: colors.background,
+      top: -6,
+      marginLeft: -10,
+      elevation: 2,
     },
     adjRow: { flexDirection: "row", gap: 6 },
     adjBtn: {
@@ -472,7 +558,7 @@ function makeStyles(
       paddingHorizontal: 12,
       paddingVertical: 6,
       backgroundColor: colors.muted,
-      borderRadius: colors.radius - 2,
+      borderRadius: colors.radius - 4,
       borderWidth: 1,
       borderColor: colors.border,
     },
@@ -482,69 +568,54 @@ function makeStyles(
     },
     presetText: {
       fontSize: 12,
-      fontFamily: "Inter_500Medium",
-      color: colors.mutedForeground,
-    },
-    presetTextActive: {
-      color: colors.primaryForeground,
       fontFamily: "Inter_600SemiBold",
+      color: colors.foreground,
     },
-    toggle: {
-      width: 48,
-      height: 28,
-      borderRadius: 14,
-      backgroundColor: colors.muted,
-      borderWidth: 1,
-      borderColor: colors.border,
-      justifyContent: "center",
-      paddingHorizontal: 2,
-    },
-    toggleOn: { backgroundColor: colors.primary, borderColor: colors.primary },
-    toggleKnob: {
-      width: 22,
-      height: 22,
-      borderRadius: 11,
-      backgroundColor: colors.mutedForeground,
-    },
-    toggleKnobOn: { alignSelf: "flex-end", backgroundColor: colors.primaryForeground },
+    presetTextActive: { color: colors.primaryForeground },
     modeRow: { flexDirection: "row", gap: 8 },
     modeBtn: {
       flex: 1,
       paddingVertical: 12,
       alignItems: "center",
-      gap: 4,
       backgroundColor: colors.muted,
       borderRadius: colors.radius - 2,
       borderWidth: 1,
       borderColor: colors.border,
+      gap: 4,
     },
-    modeBtnActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+    modeBtnActive: {
+      backgroundColor: colors.primary,
+      borderColor: colors.primary,
+    },
     modeIcon: { fontSize: 20 },
     modeLbl: {
       fontSize: 11,
       fontFamily: "Inter_600SemiBold",
-      color: colors.mutedForeground,
+      color: colors.foreground,
       letterSpacing: 0.5,
     },
     modeLblActive: { color: colors.primaryForeground },
     statsRow: {
+      width: "100%",
       flexDirection: "row",
       backgroundColor: colors.card,
       borderRadius: colors.radius,
       borderWidth: 1,
       borderColor: colors.border,
-      overflow: "hidden",
-      width: "100%",
+      padding: 12,
     },
-    statItem: { flex: 1, paddingVertical: 16, alignItems: "center", gap: 4 },
-    statVal: { fontSize: 18, fontFamily: "Inter_700Bold", color: colors.foreground },
+    statItem: { flex: 1, alignItems: "center", gap: 2 },
+    statVal: {
+      fontSize: 16,
+      fontFamily: "Inter_700Bold",
+      color: colors.foreground,
+    },
     statLbl: {
-      fontSize: 9,
+      fontSize: 10,
       fontFamily: "Inter_400Regular",
       color: colors.mutedForeground,
-      letterSpacing: 1,
     },
-    statDiv: { width: 1, backgroundColor: colors.border },
+    statDiv: { width: 1, backgroundColor: colors.border, marginHorizontal: 4 },
     permBtn: {
       width: "100%",
       paddingVertical: 14,
