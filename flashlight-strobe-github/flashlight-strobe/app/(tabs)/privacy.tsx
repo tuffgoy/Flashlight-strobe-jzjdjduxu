@@ -85,7 +85,7 @@ const POLICY_SECTIONS: PolicySection[] = [
     id: "contact",
     title: "Contact",
     content:
-      "Questions about this policy? Reach out via the app's store page listing. We typically respond within 48 hours.",
+      "Questions about this policy? Reach out via Whatsapp for now. We typically respond within 48 hours.",
   },
 ];
 
