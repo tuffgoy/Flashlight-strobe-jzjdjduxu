@@ -25,8 +25,9 @@ import { useColors } from "@/hooks/useColors";
 import { SessionLog, useLogger } from "@/hooks/useLogger";
 import { LANG_LABELS, LangCode } from "@/lib/translations";
 
-const APP_VERSION = "1.1.0";
+const APP_VERSION = "1.4.0";
 const EPILEPSY_KEY = "@strobe_epilepsy_accepted";
+const SCREEN_FLASH_AREA_KEY = "strobe_screen_flash_area";
 
 function formatDuration(ms: number): string {
   if (ms < 1000) return "<1s";
@@ -66,10 +67,23 @@ export default function SettingsScreen() {
   const [logs, setLogs] = useState<SessionLog[]>([]);
   const [logsLoading, setLogsLoading] = useState(true);
   const [checkStatus, setCheckStatus] = useState<"idle" | "ok" | "fail">("idle");
+  const [screenFlashArea, setScreenFlashAreaState] = useState<"fullscreen" | "safearea">("safearea");
 
   useEffect(() => {
     getLogs().then((l) => { setLogs(l); setLogsLoading(false); });
   }, [getLogs]);
+
+  useEffect(() => {
+    AsyncStorage.getItem(SCREEN_FLASH_AREA_KEY).then((v) => {
+      if (v === "fullscreen" || v === "safearea") setScreenFlashAreaState(v);
+    }).catch(() => {});
+  }, []);
+
+  const handleSetScreenFlashArea = useCallback((area: "fullscreen" | "safearea") => {
+    setScreenFlashAreaState(area);
+    AsyncStorage.setItem(SCREEN_FLASH_AREA_KEY, area).catch(() => {});
+    Haptics.selectionAsync();
+  }, []);
 
   const handleCheckUpdates = useCallback(async () => {
     const result = await fetchConfig();
@@ -165,6 +179,32 @@ export default function SettingsScreen() {
               Couldn't connect — using defaults
             </Text>
           )}
+        </View>
+
+        {/* ── Screen Flash Area ─────────────────────────────────── */}
+        <View>
+          <Text style={s.sectionTitle}>SCREEN FLASH</Text>
+          <View style={s.card}>
+            <Text style={s.settingDesc}>Flash coverage when screen mode is active</Text>
+            <View style={s.segmentRow}>
+              {(["safearea", "fullscreen"] as const).map((area) => (
+                <Pressable
+                  key={area}
+                  style={[s.segmentBtn, screenFlashArea === area && s.segmentBtnActive]}
+                  onPress={() => handleSetScreenFlashArea(area)}
+                >
+                  <Text style={[s.segmentBtnText, screenFlashArea === area && s.segmentBtnTextActive]}>
+                    {area === "safearea" ? "Above Navigation" : "Full Screen"}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+            <Text style={s.lastChecked}>
+              {screenFlashArea === "fullscreen"
+                ? "Flash covers the entire screen including the navigation bar"
+                : "Flash covers the content area above the navigation bar"}
+            </Text>
+          </View>
         </View>
 
         {/* ── Language ──────────────────────────────────────────── */}
@@ -282,6 +322,7 @@ function makeStyles(
     content: { paddingHorizontal: 16, paddingTop: insets.top + 16, paddingBottom: insets.bottom + 100, gap: 16 },
     sectionTitle: { fontSize: 10, fontFamily: "Inter_700Bold", color: colors.mutedForeground, letterSpacing: 2, marginBottom: 8 },
     card: { backgroundColor: colors.card, borderRadius: colors.radius, borderWidth: 1, borderColor: colors.border, padding: 16, gap: 12 },
+    settingDesc: { fontSize: 13, fontFamily: "Inter_400Regular", color: colors.mutedForeground },
 
     // Update
     updateBanner: {
@@ -296,7 +337,18 @@ function makeStyles(
       paddingVertical: 14, borderRadius: colors.radius, alignItems: "center",
     },
     updateCheckBtnText: { fontSize: 14, fontFamily: "Inter_600SemiBold", color: colors.primaryForeground },
-    lastChecked: { fontSize: 11, fontFamily: "Inter_400Regular", color: colors.mutedForeground, textAlign: "center", marginTop: 6 },
+    lastChecked: { fontSize: 11, fontFamily: "Inter_400Regular", color: colors.mutedForeground, textAlign: "center", marginTop: 4 },
+
+    // Screen Flash Area segment
+    segmentRow: { flexDirection: "row", gap: 8 },
+    segmentBtn: {
+      flex: 1, paddingVertical: 10, alignItems: "center",
+      backgroundColor: colors.muted, borderRadius: colors.radius - 2,
+      borderWidth: 1, borderColor: colors.border,
+    },
+    segmentBtnActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+    segmentBtnText: { fontSize: 13, fontFamily: "Inter_600SemiBold", color: colors.foreground },
+    segmentBtnTextActive: { color: colors.primaryForeground },
 
     // Language
     langGrid: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
