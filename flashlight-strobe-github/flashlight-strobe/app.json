@@ -43,8 +43,7 @@
       "expo-font",
       "expo-web-browser",
       "expo-camera",
-      "expo-av",
-      "expo-keep-awake"
+      "expo-av"
     ],
     "experiments": {
       "typedRoutes": true,
