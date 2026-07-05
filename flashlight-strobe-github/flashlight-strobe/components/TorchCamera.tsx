@@ -8,10 +8,16 @@
  *
  * Permission is owned by the parent (single source of truth) and passed
  * as a prop so we never have two concurrent useCameraPermissions() hooks.
+ *
+ * Torch fix: use useReducer with a sequence counter instead of useState.
+ * The counter ensures each dispatch produces a new state object, which
+ * forces a re-render even when the boolean value hasn't changed — defeating
+ * React 18 automatic batching and React Compiler auto-memoization that
+ * were causing rapid toggle calls to be coalesced (torch stuck on).
  */
 
 import { CameraView } from "expo-camera";
-import React, { useImperativeHandle, useState } from "react";
+import React, { useImperativeHandle, useReducer } from "react";
 import { Platform, StyleSheet } from "react-native";
 
 export interface TorchCameraHandle {
@@ -22,11 +28,22 @@ interface TorchCameraProps {
   permissionGranted: boolean;
 }
 
+type TorchState = { on: boolean; seq: number };
+
+function torchReducer(prev: TorchState, on: boolean): TorchState {
+  return { on, seq: prev.seq + 1 };
+}
+
 export const TorchCamera = React.forwardRef<TorchCameraHandle, TorchCameraProps>(
   function TorchCamera({ permissionGranted }, ref) {
-    const [torchOn, setTorchOn] = useState(false);
+    "use no memo";
+    const [{ on: torchOn }, dispatch] = useReducer(torchReducer, { on: false, seq: 0 });
 
-    useImperativeHandle(ref, () => ({ setTorch: setTorchOn }));
+    useImperativeHandle(
+      ref,
+      () => ({ setTorch: (on: boolean) => dispatch(on) }),
+      [],
+    );
 
     // Web has no hardware torch — parent handles screen-flash overlay.
     // Only render when permission is granted so CameraView never shows an
