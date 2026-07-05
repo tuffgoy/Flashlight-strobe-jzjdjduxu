@@ -12,6 +12,7 @@ import * as SplashScreen from "expo-splash-screen";
 import React, { useEffect, useRef, useState } from "react";
 import {
   Alert,
+  Animated,
   Linking,
   Modal,
   Platform,
@@ -28,6 +29,10 @@ import { SafeAreaProvider } from "react-native-safe-area-context";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { RemoteConfigProvider } from "@/context/RemoteConfigContext";
 import { LanguageProvider } from "@/context/LanguageContext";
+import {
+  FullscreenFlashProvider,
+  useFullscreenFlash,
+} from "@/context/FullscreenFlashContext";
 
 // ── App version (keep in sync with app.json) ─────────────────────────────────
 const APP_VERSION = "1.4.0";
@@ -78,6 +83,26 @@ function isNewer(current: string, remote: string): boolean {
   if (rMaj !== cMaj) return rMaj > cMaj;
   if (rMin !== cMin) return rMin > cMin;
   return rPat > cPat;
+}
+
+// ── Full-screen flash overlay (rendered above the tab bar) ────────────────────
+
+function FullscreenFlashOverlay() {
+  const { flashAnim } = useFullscreenFlash();
+  return (
+    <Animated.View
+      pointerEvents="none"
+      style={[
+        StyleSheet.absoluteFillObject,
+        {
+          backgroundColor: "#ffffff",
+          opacity: flashAnim,
+          zIndex: 99999,
+          elevation: 99999,
+        },
+      ]}
+    />
+  );
 }
 
 // ── Update dialog ─────────────────────────────────────────────────────────────
@@ -264,31 +289,35 @@ export default function RootLayout() {
 
   return (
     <SafeAreaProvider>
-      <ErrorBoundary>
-        <QueryClientProvider client={queryClient}>
-          <LanguageProvider>
-            <RemoteConfigProvider>
-              <GestureHandlerRootView>
-                <KeyboardProvider>
-                  <RootLayoutNav />
-                  {/* Epilepsy warning shown on first launch before anything else */}
-                  {showEpilepsyWarning && (
-                    <EpilepsyWarning onAccept={handleEpilepsyAccept} />
-                  )}
-                  {/* Update dialog shown after epilepsy warning is dismissed */}
-                  {!showEpilepsyWarning && updateInfo && (
-                    <UpdateDialog
-                      info={updateInfo}
-                      onDownload={handleDownload}
-                      onDismiss={handleDismiss}
-                    />
-                  )}
-                </KeyboardProvider>
-              </GestureHandlerRootView>
-            </RemoteConfigProvider>
-          </LanguageProvider>
-        </QueryClientProvider>
-      </ErrorBoundary>
+      <FullscreenFlashProvider>
+        <ErrorBoundary>
+          <QueryClientProvider client={queryClient}>
+            <LanguageProvider>
+              <RemoteConfigProvider>
+                <GestureHandlerRootView>
+                  <KeyboardProvider>
+                    <RootLayoutNav />
+                    {/* Epilepsy warning shown on first launch before anything else */}
+                    {showEpilepsyWarning && (
+                      <EpilepsyWarning onAccept={handleEpilepsyAccept} />
+                    )}
+                    {/* Update dialog shown after epilepsy warning is dismissed */}
+                    {!showEpilepsyWarning && updateInfo && (
+                      <UpdateDialog
+                        info={updateInfo}
+                        onDownload={handleDownload}
+                        onDismiss={handleDismiss}
+                      />
+                    )}
+                  </KeyboardProvider>
+                </GestureHandlerRootView>
+              </RemoteConfigProvider>
+            </LanguageProvider>
+          </QueryClientProvider>
+        </ErrorBoundary>
+        {/* Full-screen flash overlay — rendered above the tab bar */}
+        <FullscreenFlashOverlay />
+      </FullscreenFlashProvider>
     </SafeAreaProvider>
   );
 }
