@@ -35,8 +35,6 @@ import { useLogger } from "@/hooks/useLogger";
 
 const MIN_HZ = 0.5;
 const MAX_HZ = 120;
-const MIN_DUTY = 10;
-const MAX_DUTY = 90;
 
 // Timer presets in seconds (0 = no timer)
 const TIMER_PRESETS = [0, 30, 60, 300, 600];
@@ -70,7 +68,6 @@ export default function StrobeScreen() {
   const [permission, requestPermission] = useCameraPermissions();
   const [isActive, setIsActive] = useState(false);
   const [hz, setHz] = useState(10);
-  const [dutyCycle, setDutyCycle] = useState(50);
   const [screenFlash, setScreenFlash] = useState(false);
   const [timerPresetIdx, setTimerPresetIdx] = useState(0); // index into TIMER_PRESETS
   const [countdown, setCountdown] = useState(0);
@@ -143,7 +140,7 @@ export default function StrobeScreen() {
     sessionStart.current = Date.now();
 
     const period = 1000 / hz;
-    const onMs = period * (dutyCycle / 100);
+    const halfPeriod = period / 2; // pure 50/50 — flash on, flash off, repeat
     const startTime = performance.now();
     let lastState: boolean | null = null;
 
@@ -154,7 +151,7 @@ export default function StrobeScreen() {
     const id = setInterval(() => {
       const elapsed = performance.now() - startTime;
       const phase = elapsed % period;
-      const shouldBeOn = phase < onMs;
+      const shouldBeOn = phase < halfPeriod;
 
       if (shouldBeOn !== lastState) {
         lastState = shouldBeOn;
@@ -177,7 +174,7 @@ export default function StrobeScreen() {
             timestamp: sessionStart.current,
             mode: screenFlash ? (permissionGrantedRef.current ? "both" : "screen") : "torch",
             hz,
-            dutyCycle,
+            dutyCycle: 50,
             color: "#FFD700",
             durationMs,
           });
@@ -186,7 +183,7 @@ export default function StrobeScreen() {
       }
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isActive, hz, dutyCycle, screenFlash, flashAnim]);
+  }, [isActive, hz, screenFlash, flashAnim]);
   // NOTE: logSession and permission?.granted are intentionally excluded —
   // they update via refs above so the engine never restarts mid-flash.
 
@@ -197,8 +194,6 @@ export default function StrobeScreen() {
 
   const adjustHz = (delta: number) =>
     setHz((prev) => clamp(parseFloat((prev + delta).toFixed(1)), MIN_HZ, MAX_HZ));
-  const adjustDuty = (delta: number) =>
-    setDutyCycle((prev) => clamp(prev + delta, MIN_DUTY, MAX_DUTY));
 
   const timerPreset = TIMER_PRESETS[timerPresetIdx];
 
@@ -277,43 +272,6 @@ export default function StrobeScreen() {
           </View>
         </View>
 
-        {/* ── Duty cycle ─────────────────────────────────────────── */}
-        <View style={styles.card}>
-          <Text style={styles.cardLabel}>{t.dutyCycle}</Text>
-          <Text style={styles.bigVal}>{dutyCycle}%</Text>
-          <Text style={styles.subText}>{t.flashOnTime}</Text>
-
-          <View style={styles.sliderTrack}>
-            <View style={[styles.sliderFill, { width: `${((dutyCycle - MIN_DUTY) / (MAX_DUTY - MIN_DUTY)) * 100}%` as any }]} />
-          </View>
-
-          <View style={styles.adjRow}>
-            {[-20, -10, -5].map((d) => (
-              <Pressable key={d} style={styles.adjBtn} onPress={() => adjustDuty(d)}>
-                <Text style={styles.adjBtnText}>{d}</Text>
-              </Pressable>
-            ))}
-            <View style={{ flex: 1 }} />
-            {[5, 10, 20].map((d) => (
-              <Pressable key={d} style={styles.adjBtn} onPress={() => adjustDuty(d)}>
-                <Text style={styles.adjBtnText}>+{d}</Text>
-              </Pressable>
-            ))}
-          </View>
-
-          <View style={styles.presetRow}>
-            {[10, 25, 50, 75, 90].map((v) => (
-              <Pressable
-                key={v}
-                style={[styles.presetBtn, dutyCycle === v && styles.presetBtnActive]}
-                onPress={() => setDutyCycle(v)}
-              >
-                <Text style={[styles.presetText, dutyCycle === v && styles.presetTextActive]}>{v}%</Text>
-              </Pressable>
-            ))}
-          </View>
-        </View>
-
         {/* ── Screen flash toggle ─────────────────────────────────── */}
         <Pressable
           style={[styles.card, styles.toggleRow]}
@@ -356,9 +314,9 @@ export default function StrobeScreen() {
         <View style={styles.statsRow}>
           {[
             { val: hz.toFixed(1), lbl: "Hz" },
-            { val: `${dutyCycle}`, lbl: "DUTY%" },
-            { val: `${(1000 / hz).toFixed(0)}`, lbl: t.msCycle },
-            { val: `${((1000 / hz) * (dutyCycle / 100)).toFixed(0)}`, lbl: t.msOn },
+            { val: `${(1000 / hz).toFixed(0)}`, lbl: "ms / cycle" },
+            { val: `${(1000 / hz / 2).toFixed(0)}`, lbl: "ms ON" },
+            { val: `${(1000 / hz / 2).toFixed(0)}`, lbl: "ms OFF" },
           ].map((item, i, arr) => (
             <React.Fragment key={item.lbl}>
               <View style={styles.statItem}>
