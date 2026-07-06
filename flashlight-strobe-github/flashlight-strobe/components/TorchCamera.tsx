@@ -1,78 +1,87 @@
 /**
- * TorchCamera — controls the device torch without showing any camera preview.
+ * TorchCamera — controls the device torch LED.
  *
- * The CameraView MUST have a non-zero size (≥ 1×1) and be laid out in the
- * view hierarchy for Android to initialise the camera sensor and activate
- * the torch LED.  We place it 9 999 px above the visible area so it is
- * completely hidden while still being "real" to the hardware.
+ * Uses react-native-torch which wraps Android's CameraManager.setTorchMode()
+ * and iOS's AVCaptureDevice.torchMode directly.
  *
- * Permission is owned by the parent (single source of truth) and passed
- * as a prop so we never have two concurrent useCameraPermissions() hooks.
+ * WHY NOT expo-camera's CameraView?
+ *   CameraView creates a full camera session (even 1×1 offscreen).  On Android
+ *   12+ any active camera session triggers the privacy indicator (orange dot in
+ *   the status bar).  CameraManager.setTorchMode() is a hardware-level call
+ *   that requires NO camera session and NO camera permission on Android, so the
+ *   indicator never appears.
  *
- * `enabled` prop: pass false when the current flash mode does not require
- * the torch (e.g. screen-only mode).  This prevents the camera sensor from
- * activating unnecessarily, avoiding the camera-in-use indicator in the
- * Android notification bar when torch is not needed.
+ * This component is a pure-logic forwardRef with no rendered output — it
+ * simply calls the native torch API imperatively via the ref handle.
  *
- * Torch fix: use useReducer with a sequence counter instead of useState.
- * The counter ensures each dispatch produces a new state object, which
- * forces a re-render even when the boolean value hasn't changed — defeating
- * React 18 automatic batching and React Compiler auto-memoization that
- * were causing rapid toggle calls to be coalesced (torch stuck on).
+ * Props:
+ *  - enabled: pass false to suppress all torch calls (e.g. screen-only mode).
+ *    Defaults to true.
+ *  - permissionGranted: kept for API compatibility; on Android it is ignored
+ *    because CameraManager.setTorchMode() needs no camera permission.  On iOS,
+ *    torch will fail gracefully if camera permission is not granted.
  */
 
-import { CameraView } from "expo-camera";
-import React, { useImperativeHandle, useReducer } from "react";
-import { Platform, StyleSheet } from "react-native";
+// react-native-torch ships without bundled TS types; the module is imported
+// via require so that TypeScript doesn't error on the missing declaration.
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const RNTorch = require("react-native-torch") as {
+  default: { switchState: (on: boolean) => void };
+};
+const Torch = RNTorch.default ?? (RNTorch as unknown as { switchState: (on: boolean) => void });
+
+import React, { useEffect, useImperativeHandle, useRef } from "react";
+import { Platform } from "react-native";
 
 export interface TorchCameraHandle {
   setTorch: (on: boolean) => void;
 }
 
 interface TorchCameraProps {
-  permissionGranted: boolean;
-  /** Set to false to prevent camera activation when torch is not needed. Defaults to true. */
+  /** Ignored on Android — CameraManager needs no camera permission. Kept for iOS compat. */
+  permissionGranted?: boolean;
+  /** Set to false when torch is not needed (screen-only mode). Default: true. */
   enabled?: boolean;
 }
 
-type TorchState = { on: boolean; seq: number };
-
-function torchReducer(prev: TorchState, on: boolean): TorchState {
-  return { on, seq: prev.seq + 1 };
+function safeTorch(on: boolean) {
+  if (Platform.OS === "web") return;
+  try {
+    Torch.switchState(on);
+  } catch {
+    // Device has no flashlight or torch unavailable — silently ignore
+  }
 }
 
 export const TorchCamera = React.forwardRef<TorchCameraHandle, TorchCameraProps>(
-  function TorchCamera({ permissionGranted, enabled = true }, ref) {
+  function TorchCamera({ enabled = true }, ref) {
     "use no memo";
-    const [{ on: torchOn }, dispatch] = useReducer(torchReducer, { on: false, seq: 0 });
+
+    const enabledRef = useRef(enabled);
+    enabledRef.current = enabled;
 
     useImperativeHandle(
       ref,
-      () => ({ setTorch: (on: boolean) => dispatch(on) }),
+      () => ({
+        setTorch: (on: boolean) => {
+          // When disabled (screen-only mode), ensure torch is always off.
+          safeTorch(on && enabledRef.current);
+        },
+      }),
       [],
     );
 
-    // Web has no hardware torch — parent handles screen-flash overlay.
-    // Only render when permission is granted AND torch is actually needed.
-    if (Platform.OS === "web" || !permissionGranted || !enabled) return null;
+    // When `enabled` flips to false at runtime, immediately cut the torch.
+    useEffect(() => {
+      if (!enabled) safeTorch(false);
+    }, [enabled]);
 
-    return (
-      <CameraView
-        style={styles.offScreen}
-        enableTorch={torchOn}
-        facing="back"
-      />
-    );
-  }
-);
+    // Always turn off torch on unmount.
+    useEffect(() => {
+      return () => { safeTorch(false); };
+    }, []);
 
-const styles = StyleSheet.create({
-  offScreen: {
-    position: "absolute",
-    width: 1,
-    height: 1,
-    top: -9999,   // well above the viewport — hardware still initialises
-    left: 0,
-    opacity: 0,
+    // No rendered output — this is a pure imperative controller.
+    return null;
   },
-});
+);
