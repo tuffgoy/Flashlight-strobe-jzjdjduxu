@@ -2,34 +2,28 @@
  * StrobeScreen — main strobe/flashlight tab.
  *
  * Flash modes:
- *  - "torch"  → LED flashlight only
- *  - "screen" → display flash only (works without camera permission)
+ *  - "torch"  → LED flashlight only (via react-native-torch, no camera session)
+ *  - "screen" → display flash only
  *  - "both"   → LED + screen together
  *
- * Screen flash area (persisted in AsyncStorage):
- *  - "safearea"   → flash overlay covers only the content area above the tab bar
- *  - "fullscreen" → flash overlay covers the entire screen including the tab bar
- *                   (rendered at the root layout level via FullscreenFlashContext;
- *                    the Modal only mounts while actively strobing)
+ * Screen flash area (shown when mode is screen or both):
+ *  - "safearea"   → covers only the content area (above the tab bar)
+ *  - "fullscreen" → covers the entire screen including the tab bar
+ *                   (uses a Modal mounted at the root layout level)
  *
- * Music Beat Sync:
- *  - Pick any local audio file
- *  - It plays through the speaker while you tap the BPM tap button in rhythm
- *  - The detected BPM automatically sets the strobe Hz
+ * Flash color: user-selectable palette for the screen flash overlay.
  *
  * Performance design:
- *  - TorchCamera only mounts when the flash mode actually requires the torch.
- *    In screen-only mode the camera sensor never activates.
- *  - Drift-correcting scheduler: each tick computes its absolute expected
- *    fire time from a fixed epoch to prevent phase slip at high frequencies.
+ *  - react-native-torch calls CameraManager.setTorchMode() directly — no
+ *    camera session, no camera-in-use indicator on Android.
+ *  - Drift-correcting scheduler: each tick is scheduled relative to an absolute
+ *    epoch so phase slip cannot accumulate over many cycles.
  *  - Wake lock keeps the screen on while strobing.
  *  - Auto-stop timer cuts the strobe after a chosen duration.
  */
 
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { Audio } from "expo-av";
 import { useCameraPermissions } from "expo-camera";
-import * as DocumentPicker from "expo-document-picker";
 import * as Haptics from "expo-haptics";
 import * as KeepAwake from "expo-keep-awake";
 import React, { useCallback, useEffect, useRef, useState } from "react";
@@ -53,11 +47,19 @@ import { useLogger } from "@/hooks/useLogger";
 
 const MIN_HZ = 0.5;
 const MAX_HZ = 120;
-
 const TIMER_PRESETS = [0, 30, 60, 300, 600];
-
 const TAP_WINDOW = 8;
 const TAP_RESET_MS = 3000;
+
+const FLASH_COLORS = [
+  { label: "White",  value: "#ffffff" },
+  { label: "Yellow", value: "#FFD700" },
+  { label: "Red",    value: "#ef4444" },
+  { label: "Blue",   value: "#3b82f6" },
+  { label: "Green",  value: "#22c55e" },
+  { label: "Cyan",   value: "#06b6d4" },
+  { label: "Purple", value: "#a855f7" },
+];
 
 function clamp(val: number, lo: number, hi: number) {
   return Math.max(lo, Math.min(hi, val));
@@ -84,13 +86,16 @@ export default function StrobeScreen() {
   const { t } = useLanguage();
   const { logSession } = useLogger();
 
+  // react-native-torch doesn't need camera permission on Android.
+  // Keep the hook for iOS compatibility and the permission prompt UI.
   const [permission, requestPermission] = useCameraPermissions();
+
   const [isActive, setIsActive] = useState(false);
   const [hz, setHz] = useState(10);
   const [flashMode, setFlashMode] = useState<"torch" | "screen" | "both">("torch");
+  const [screenFlashArea, setScreenFlashArea] = useState<"fullscreen" | "safearea">("safearea");
   const [timerPresetIdx, setTimerPresetIdx] = useState(0);
   const [countdown, setCountdown] = useState(0);
-  const [screenFlashArea, setScreenFlashArea] = useState<"fullscreen" | "safearea">("safearea");
 
   // BPM tap state
   const tapTimesRef = useRef<number[]>([]);
@@ -98,40 +103,35 @@ export default function StrobeScreen() {
   const [detectedBpm, setDetectedBpm] = useState<number | null>(null);
   const [tapCount, setTapCount] = useState(0);
 
-  // Music beat sync state
-  const [musicName, setMusicName] = useState<string | null>(null);
-  const [musicUri, setMusicUri] = useState<string | null>(null);
-  const [musicPlaying, setMusicPlaying] = useState(false);
-  const [musicLoading, setMusicLoading] = useState(false);
-  const soundRef = useRef<Audio.Sound | null>(null);
-
   const torchRef = useRef<TorchCameraHandle>(null);
   const flashAnim = useRef(new Animated.Value(0)).current;
   const sessionStart = useRef<number | null>(null);
-
   const logSessionRef = useRef(logSession);
   logSessionRef.current = logSession;
 
-  const { flashAnim: fullscreenFlashAnim, setFullscreenActive } = useFullscreenFlash();
+  const {
+    flashAnim: fullscreenFlashAnim,
+    setFullscreenActive,
+    flashColor,
+    setFlashColor,
+  } = useFullscreenFlash();
+
   const isFullscreenRef = useRef(false);
   const setFullscreenActiveRef = useRef(setFullscreenActive);
   setFullscreenActiveRef.current = setFullscreenActive;
 
   // ── Hz slider ──────────────────────────────────────────────────────────────
   const sliderWidth = useRef(1);
-
   const sliderPan = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
       onMoveShouldSetPanResponder: () => true,
       onPanResponderGrant: (evt) => {
-        const x = evt.nativeEvent.locationX;
-        const ratio = Math.max(0, Math.min(1, x / sliderWidth.current));
+        const ratio = Math.max(0, Math.min(1, evt.nativeEvent.locationX / sliderWidth.current));
         setHz(parseFloat((MIN_HZ + ratio * (MAX_HZ - MIN_HZ)).toFixed(1)));
       },
       onPanResponderMove: (evt) => {
-        const x = evt.nativeEvent.locationX;
-        const ratio = Math.max(0, Math.min(1, x / sliderWidth.current));
+        const ratio = Math.max(0, Math.min(1, evt.nativeEvent.locationX / sliderWidth.current));
         setHz(parseFloat((MIN_HZ + ratio * (MAX_HZ - MIN_HZ)).toFixed(1)));
       },
     })
@@ -169,84 +169,6 @@ export default function StrobeScreen() {
 
   useEffect(() => () => { if (tapResetRef.current) clearTimeout(tapResetRef.current); }, []);
 
-  // ── Music beat sync ────────────────────────────────────────────────────────
-
-  const handlePickMusic = useCallback(async () => {
-    try {
-      const result = await DocumentPicker.getDocumentAsync({
-        type: "audio/*",
-        copyToCacheDirectory: true,
-      });
-      if (result.canceled || !result.assets?.[0]) return;
-      const asset = result.assets[0];
-      // Stop any currently playing track first
-      if (soundRef.current) {
-        await soundRef.current.stopAsync().catch(() => {});
-        await soundRef.current.unloadAsync().catch(() => {});
-        soundRef.current = null;
-        setMusicPlaying(false);
-      }
-      setMusicUri(asset.uri);
-      setMusicName(asset.name ?? "Audio file");
-    } catch {
-      // User cancelled or permission denied — ignore
-    }
-  }, []);
-
-  const handlePlayMusic = useCallback(async () => {
-    if (!musicUri) return;
-    setMusicLoading(true);
-    try {
-      // Ensure audio mode allows playback alongside recording (iOS)
-      await Audio.setAudioModeAsync({
-        playsInSilentModeIOS: true,
-        allowsRecordingIOS: false,
-        staysActiveInBackground: false,
-      }).catch(() => {});
-
-      if (soundRef.current) {
-        await soundRef.current.unloadAsync().catch(() => {});
-        soundRef.current = null;
-      }
-      const { sound } = await Audio.Sound.createAsync({ uri: musicUri });
-      soundRef.current = sound;
-      sound.setOnPlaybackStatusUpdate((status) => {
-        if (status.isLoaded && status.didJustFinish) {
-          setMusicPlaying(false);
-        }
-      });
-      await sound.playAsync();
-      setMusicPlaying(true);
-    } catch {
-      // Playback failed — reset state
-      soundRef.current = null;
-      setMusicPlaying(false);
-    } finally {
-      setMusicLoading(false);
-    }
-  }, [musicUri]);
-
-  const handleStopMusic = useCallback(async () => {
-    const s = soundRef.current;
-    soundRef.current = null;
-    setMusicPlaying(false);
-    if (s) {
-      await s.stopAsync().catch(() => {});
-      await s.unloadAsync().catch(() => {});
-    }
-  }, []);
-
-  // Cleanup music on unmount
-  useEffect(() => {
-    return () => {
-      const s = soundRef.current;
-      if (s) {
-        s.stopAsync().catch(() => {});
-        s.unloadAsync().catch(() => {});
-      }
-    };
-  }, []);
-
   // ── Persist flash mode ─────────────────────────────────────────────────────
   useEffect(() => {
     AsyncStorage.getItem("strobe_flash_mode").then((v) => {
@@ -264,6 +186,7 @@ export default function StrobeScreen() {
     }).catch(() => {});
   }, []);
   useEffect(() => {
+    AsyncStorage.setItem("strobe_screen_flash_area", screenFlashArea).catch(() => {});
     isFullscreenRef.current = screenFlashArea === "fullscreen";
     flashAnim.setValue(0);
     fullscreenFlashAnim.setValue(0);
@@ -271,7 +194,7 @@ export default function StrobeScreen() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [screenFlashArea]);
 
-  // Camera permission request on mount
+  // Camera permission request on mount (iOS torch compatibility)
   useEffect(() => {
     if (!permission?.granted && permission?.canAskAgain !== false) {
       requestPermission().catch(() => {});
@@ -321,8 +244,6 @@ export default function StrobeScreen() {
     const useScreen = flashMode !== "torch" || Platform.OS === "web";
     const fullscreen = isFullscreenRef.current && useScreen;
 
-    // Activate the fullscreen Modal BEFORE the first tick so the overlay is
-    // mounted and ready before we start setting the flash value.
     if (fullscreen) setFullscreenActiveRef.current(true);
 
     let timeoutId: ReturnType<typeof setTimeout>;
@@ -345,7 +266,6 @@ export default function StrobeScreen() {
         }
       }
       tickCount++;
-      // Drift-correcting: schedule relative to the absolute epoch, not "now"
       const delay = Math.max(0, epoch + tickCount * halfPeriod - Date.now());
       timeoutId = setTimeout(tick, delay);
     }
@@ -367,7 +287,7 @@ export default function StrobeScreen() {
             mode: flashMode,
             hz,
             dutyCycle: 50,
-            color: "#FFD700",
+            color: flashColor,
             durationMs,
           });
         }
@@ -389,23 +309,20 @@ export default function StrobeScreen() {
   const styles = makeStyles(colors, insets);
   const fillPct = `${((hz - MIN_HZ) / (MAX_HZ - MIN_HZ)) * 100}%` as any;
 
-  // TorchCamera is only needed when torch is part of the flash mode
-  const torchNeeded = flashMode !== "screen" && Platform.OS !== "web";
+  // Torch only needs to be active when flash mode uses the LED
+  const torchNeeded = flashMode !== "screen";
+  const showScreenOptions = flashMode !== "torch";
 
   return (
     <View style={styles.root}>
-      {/* Screen flash overlay — safe-area mode only */}
+      {/* Safe-area screen flash overlay (not fullscreen mode) */}
       <Animated.View
         pointerEvents="none"
-        style={[styles.flashOverlay, { opacity: flashAnim }]}
+        style={[styles.flashOverlay, { opacity: flashAnim, backgroundColor: flashColor }]}
       />
 
-      {/* Off-screen camera — only mounts when torch is actually needed */}
-      <TorchCamera
-        ref={torchRef}
-        permissionGranted={permission?.granted ?? false}
-        enabled={torchNeeded}
-      />
+      {/* Torch controller — react-native-torch, no camera session or indicator */}
+      <TorchCamera ref={torchRef} enabled={torchNeeded} />
 
       <ScrollView
         contentContainerStyle={styles.scroll}
@@ -422,7 +339,6 @@ export default function StrobeScreen() {
           <Pressable
             style={[styles.mainBtn, isActive && styles.mainBtnActive]}
             onPress={handleToggle}
-            testID="strobe-toggle"
           >
             <Text style={styles.btnIcon}>⚡</Text>
             <Text style={[styles.btnLabel, isActive && styles.btnLabelActive]}>
@@ -438,9 +354,9 @@ export default function StrobeScreen() {
         <View style={styles.card}>
           <Text style={styles.cardLabel}>{t.frequency}</Text>
           <Text style={styles.bigVal}>{hz.toFixed(1)} Hz</Text>
-          <Text style={styles.subText}>{
-            [t.hzVerySlowLabel, t.hzSlowLabel, t.hzMediumLabel, t.hzFastLabel, t.hzRapidLabel, t.hzUltraLabel][hzLabelKey(hz)]
-          }</Text>
+          <Text style={styles.subText}>
+            {[t.hzVerySlowLabel, t.hzSlowLabel, t.hzMediumLabel, t.hzFastLabel, t.hzRapidLabel, t.hzUltraLabel][hzLabelKey(hz)]}
+          </Text>
           <View
             style={styles.sliderTrack}
             onLayout={(e) => { sliderWidth.current = e.nativeEvent.layout.width || 1; }}
@@ -486,9 +402,7 @@ export default function StrobeScreen() {
               </Pressable>
             )}
           </View>
-          <Text style={styles.subText}>
-            Tap to the beat — frequency updates automatically
-          </Text>
+          <Text style={styles.subText}>Tap to the beat — Hz updates automatically</Text>
           <View style={styles.bpmRow}>
             <Pressable
               style={[styles.bpmBtn, tapCount > 0 && styles.bpmBtnActive]}
@@ -507,83 +421,21 @@ export default function StrobeScreen() {
               </View>
               <View style={styles.bpmDivider} />
               <View style={styles.bpmInfoRow}>
-                <Text style={styles.bpmInfoLabel}>SET HZ</Text>
+                <Text style={styles.bpmInfoLabel}>BPM → Hz</Text>
                 <Text style={[styles.bpmInfoVal, { color: colors.primary }]}>
-                  {detectedBpm !== null ? `${(detectedBpm / 60).toFixed(1)}` : "—"}
+                  {detectedBpm !== null ? `${detectedBpm} → ${(detectedBpm / 60).toFixed(1)}` : "—"}
                 </Text>
               </View>
               <View style={styles.bpmDivider} />
               <View style={styles.bpmInfoRow}>
-                <Text style={styles.bpmInfoLabel}>CURRENT</Text>
+                <Text style={styles.bpmInfoLabel}>SET TO</Text>
                 <Text style={styles.bpmInfoVal}>{hz.toFixed(1)} Hz</Text>
               </View>
             </View>
           </View>
-          {tapCount >= 2 && (
-            <Text style={[styles.subText, { textAlign: "center" }]}>
-              {detectedBpm !== null
-                ? `${detectedBpm} BPM → ${(detectedBpm / 60).toFixed(1)} Hz · tap more for accuracy`
-                : "Keep tapping…"}
-            </Text>
-          )}
         </View>
 
-        {/* ── Music Beat Sync ────────────────────────────────────── */}
-        <View style={styles.card}>
-          <Text style={styles.cardLabel}>MUSIC BEAT SYNC</Text>
-          <Text style={styles.subText}>
-            Load a song, play it, then tap the BPM button above in time with the beat
-          </Text>
-
-          {/* File picker */}
-          <Pressable style={styles.musicPickBtn} onPress={handlePickMusic}>
-            <Text style={styles.musicPickIcon}>🎵</Text>
-            <Text style={styles.musicPickLabel}>
-              {musicName ? "Change Song" : "Load Song"}
-            </Text>
-          </Pressable>
-
-          {/* Now playing row */}
-          {musicName && (
-            <View style={styles.musicRow}>
-              <View style={styles.musicInfo}>
-                <Text style={styles.musicName} numberOfLines={1}>{musicName}</Text>
-                <Text style={styles.musicSub}>
-                  {musicPlaying ? "Playing…" : "Ready"}
-                </Text>
-              </View>
-              <View style={styles.musicControls}>
-                {!musicPlaying ? (
-                  <Pressable
-                    style={[styles.musicBtn, styles.musicBtnPlay, musicLoading && { opacity: 0.6 }]}
-                    onPress={handlePlayMusic}
-                    disabled={musicLoading}
-                  >
-                    <Text style={styles.musicBtnText}>{musicLoading ? "…" : "▶"}</Text>
-                  </Pressable>
-                ) : (
-                  <Pressable
-                    style={[styles.musicBtn, styles.musicBtnStop]}
-                    onPress={handleStopMusic}
-                  >
-                    <Text style={styles.musicBtnText}>■</Text>
-                  </Pressable>
-                )}
-              </View>
-            </View>
-          )}
-
-          {musicPlaying && (
-            <View style={styles.musicHintRow}>
-              <Text style={styles.musicHintDot}>●</Text>
-              <Text style={[styles.subText, { flex: 1 }]}>
-                Tap the BPM button above in rhythm with the beat
-              </Text>
-            </View>
-          )}
-        </View>
-
-        {/* ── Flash mode selector ─────────────────────────────────── */}
+        {/* ── Flash mode + options ────────────────────────────────── */}
         <View style={styles.card}>
           <Text style={styles.cardLabel}>FLASH MODE</Text>
           <View style={styles.modeRow}>
@@ -602,12 +454,62 @@ export default function StrobeScreen() {
               </Pressable>
             ))}
           </View>
-          <Text style={styles.subText}>
+
+          {/* Screen area — visible when mode uses screen flash */}
+          {showScreenOptions && (
+            <>
+              <View style={styles.divider} />
+              <Text style={styles.cardLabel}>SCREEN AREA</Text>
+              <View style={styles.modeRow}>
+                {(["safearea", "fullscreen"] as const).map((area) => (
+                  <Pressable
+                    key={area}
+                    style={[styles.modeBtn, screenFlashArea === area && styles.modeBtnActive]}
+                    onPress={() => setScreenFlashArea(area)}
+                  >
+                    <Text style={styles.modeIcon}>
+                      {area === "safearea" ? "▣" : "⬛"}
+                    </Text>
+                    <Text style={[styles.modeLbl, screenFlashArea === area && styles.modeLblActive]}>
+                      {area === "safearea" ? "Safe Area" : "Fullscreen"}
+                    </Text>
+                  </Pressable>
+                ))}
+              </View>
+              <Text style={styles.subText}>
+                {screenFlashArea === "fullscreen"
+                  ? "Flash covers the entire screen including tab bar"
+                  : "Flash covers the content area only"}
+              </Text>
+
+              {/* Flash color picker */}
+              <View style={styles.divider} />
+              <Text style={styles.cardLabel}>FLASH COLOR</Text>
+              <View style={styles.colorRow}>
+                {FLASH_COLORS.map((c) => (
+                  <Pressable
+                    key={c.value}
+                    style={[
+                      styles.colorSwatch,
+                      { backgroundColor: c.value },
+                      flashColor === c.value && styles.colorSwatchActive,
+                    ]}
+                    onPress={() => setFlashColor(c.value)}
+                  />
+                ))}
+              </View>
+              <Text style={styles.subText}>
+                {FLASH_COLORS.find((c) => c.value === flashColor)?.label ?? "Custom"}
+              </Text>
+            </>
+          )}
+
+          <Text style={[styles.subText, { marginTop: showScreenOptions ? 0 : 2 }]}>
             {flashMode === "torch"
-              ? "Flashlight LED only"
+              ? "LED torch only — no camera session required"
               : flashMode === "screen"
-              ? `Screen flash only — ${screenFlashArea === "fullscreen" ? "full screen (incl. navigation)" : "above navigation"}`
-              : "Flashlight LED + screen together"}
+              ? "Screen flash only — no torch used"
+              : "LED torch + screen flash together"}
           </Text>
         </View>
 
@@ -671,10 +573,9 @@ function makeStyles(
     root: { flex: 1, backgroundColor: colors.background },
     flashOverlay: {
       ...StyleSheet.absoluteFillObject,
-      backgroundColor: "#ffffff",
       zIndex: 10,
       pointerEvents: "none",
-    },
+    } as any,
     scroll: {
       paddingHorizontal: 16,
       paddingTop: insets.top + 16,
@@ -712,9 +613,10 @@ function makeStyles(
     cardLabel: { fontSize: 10, fontFamily: "Inter_700Bold", color: colors.mutedForeground, letterSpacing: 2 },
     bigVal: { fontSize: 36, fontFamily: "Inter_700Bold", color: colors.foreground },
     subText: { fontSize: 12, fontFamily: "Inter_400Regular", color: colors.mutedForeground },
+    divider: { height: 1, backgroundColor: colors.border, marginVertical: 2 },
     sliderTrack: {
       width: "100%", height: 8, backgroundColor: colors.muted,
-      borderRadius: 4, overflow: "visible", justifyContent: "center",
+      borderRadius: 4, overflow: "visible" as any, justifyContent: "center",
     },
     sliderFill: { height: "100%", backgroundColor: colors.primary, borderRadius: 4 },
     sliderThumb: {
@@ -739,7 +641,6 @@ function makeStyles(
     presetBtnActive: { backgroundColor: colors.primary, borderColor: colors.primary },
     presetText: { fontSize: 12, fontFamily: "Inter_600SemiBold", color: colors.foreground },
     presetTextActive: { color: colors.primaryForeground },
-
     // BPM
     bpmHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
     bpmReset: { fontSize: 12, fontFamily: "Inter_600SemiBold", color: colors.mutedForeground },
@@ -763,40 +664,7 @@ function makeStyles(
     },
     bpmDivider: { height: 1, backgroundColor: colors.border },
     bpmInfoLabel: { fontSize: 10, fontFamily: "Inter_700Bold", color: colors.mutedForeground, letterSpacing: 1 },
-    bpmInfoVal: { fontSize: 15, fontFamily: "Inter_700Bold", color: colors.foreground },
-
-    // Music Beat Sync
-    musicPickBtn: {
-      flexDirection: "row", alignItems: "center", justifyContent: "center",
-      gap: 8, paddingVertical: 12,
-      backgroundColor: colors.muted, borderRadius: colors.radius - 2,
-      borderWidth: 1, borderColor: colors.border,
-    },
-    musicPickIcon: { fontSize: 18 },
-    musicPickLabel: { fontSize: 13, fontFamily: "Inter_600SemiBold", color: colors.foreground },
-    musicRow: {
-      flexDirection: "row", alignItems: "center", gap: 12,
-      backgroundColor: colors.muted, borderRadius: colors.radius - 2,
-      borderWidth: 1, borderColor: colors.border,
-      paddingHorizontal: 12, paddingVertical: 10,
-    },
-    musicInfo: { flex: 1, gap: 2 },
-    musicName: { fontSize: 13, fontFamily: "Inter_600SemiBold", color: colors.foreground },
-    musicSub: { fontSize: 11, fontFamily: "Inter_400Regular", color: colors.mutedForeground },
-    musicControls: { flexDirection: "row", gap: 8 },
-    musicBtn: {
-      width: 40, height: 40, borderRadius: 20,
-      alignItems: "center", justifyContent: "center",
-    },
-    musicBtnPlay: { backgroundColor: colors.primary },
-    musicBtnStop: { backgroundColor: "#ef4444" },
-    musicBtnText: { fontSize: 16, color: "#fff", fontFamily: "Inter_700Bold" },
-    musicHintRow: {
-      flexDirection: "row", alignItems: "center", gap: 8,
-      paddingTop: 2,
-    },
-    musicHintDot: { fontSize: 8, color: "#22c55e" },
-
+    bpmInfoVal: { fontSize: 13, fontFamily: "Inter_700Bold", color: colors.foreground },
     // Flash mode
     modeRow: { flexDirection: "row", gap: 8 },
     modeBtn: {
@@ -808,7 +676,16 @@ function makeStyles(
     modeIcon: { fontSize: 20 },
     modeLbl: { fontSize: 11, fontFamily: "Inter_600SemiBold", color: colors.foreground, letterSpacing: 0.5 },
     modeLblActive: { color: colors.primaryForeground },
-
+    // Color picker
+    colorRow: { flexDirection: "row", gap: 10, flexWrap: "wrap" },
+    colorSwatch: {
+      width: 32, height: 32, borderRadius: 16,
+      borderWidth: 2, borderColor: "transparent",
+    },
+    colorSwatchActive: {
+      borderColor: colors.foreground,
+      transform: [{ scale: 1.2 }],
+    },
     // Stats
     statsRow: {
       width: "100%", flexDirection: "row",
