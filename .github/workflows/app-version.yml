@@ -526,28 +526,40 @@ jobs:
           github.event_name == 'workflow_dispatch' &&
           github.event.inputs.bump != '' &&
           github.event.inputs.bump != 'none'
+        # release_notes is passed via env so backticks / ${} in the text
+        # cannot break the JS source — process.env reads it as a plain string.
+        env:
+          RELEASE_NOTES:  ${{ github.event.inputs.release_notes }}
+          NEW_VERSION:    ${{ steps.bump.outputs.new_version }}
+          PREV_VERSION:   ${{ steps.bump.outputs.prev_version }}
+          BUMP_TYPE:      ${{ github.event.inputs.bump }}
+          VERSION_CODE:   ${{ steps.final.outputs.version_code }}
+          DETECT_ARCH:    ${{ steps.detect.outputs.new_arch }}
+          DETECT_TORCH:   ${{ steps.detect.outputs.torch }}
+          DETECT_BUILD:   ${{ steps.detect.outputs.build_opt }}
+          REPO:           ${{ github.repository }}
         uses: actions/github-script@v7
         with:
           script: |
-            const version = '${{ steps.bump.outputs.new_version }}';
-            const prevVer = '${{ steps.bump.outputs.prev_version }}';
-            const bump    = '${{ github.event.inputs.bump }}';
-            const notes   = `${{ github.event.inputs.release_notes }}`;
+            const version  = process.env.NEW_VERSION;
+            const prevVer  = process.env.PREV_VERSION;
+            const bump     = process.env.BUMP_TYPE;
+            const notes    = process.env.RELEASE_NOTES || '';
 
-            const body = notes
+            const body = notes.trim()
               ? notes
               : [
                   `## 🔦 Flashlight Strobe v${version}`,
                   '',
                   `**Version bump:** \`${bump}\`  (\`${prevVer}\` → \`${version}\`)`,
-                  `**versionCode:** ${{ steps.final.outputs.version_code }}`,
+                  `**versionCode:** ${process.env.VERSION_CODE}`,
                   '',
                   '### Detectors',
-                  `- New Architecture: ${{ steps.detect.outputs.new_arch }}`,
-                  `- Torch compat: ${{ steps.detect.outputs.torch }}`,
-                  `- Build optimisation: ${{ steps.detect.outputs.build_opt }}`,
+                  `- New Architecture: ${process.env.DETECT_ARCH}`,
+                  `- Torch compat: ${process.env.DETECT_TORCH}`,
+                  `- Build optimisation: ${process.env.DETECT_BUILD}`,
                   '',
-                  `See [APP_INFO.txt](https://github.com/${{ github.repository }}/blob/main/APP_INFO.txt) for the full health snapshot.`,
+                  `See [APP_INFO.txt](https://github.com/${process.env.REPO}/blob/main/APP_INFO.txt) for the full health snapshot.`,
                 ].join('\n');
 
             try {
