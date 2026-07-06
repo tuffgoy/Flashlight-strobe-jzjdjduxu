@@ -29,6 +29,13 @@ interface FullscreenFlashContextType {
   /** Current screen flash color, hex string. Default: "#ffffff" */
   flashColor: string;
   setFlashColor: (color: string) => void;
+  /**
+   * Register a callback that the fullscreen overlay calls when the user taps
+   * the screen to stop the strobe.  Pass null to clear.
+   */
+  setStopCallback: (fn: (() => void) | null) => void;
+  /** Called by the fullscreen Modal when the user taps to stop. */
+  callStop: () => void;
 }
 
 const FullscreenFlashContext = createContext<FullscreenFlashContextType | null>(null);
@@ -38,6 +45,9 @@ export function FullscreenFlashProvider({ children }: { children: React.ReactNod
   const [isFullscreenActive, setIsFullscreenActive] = useState(false);
   const [flashColor, setFlashColor] = useState("#ffffff");
 
+  // Use a ref (not state) so updates don't trigger re-renders of the whole tree.
+  const stopCbRef = useRef<(() => void) | null>(null);
+
   const setFullscreenActive = useCallback(
     (active: boolean) => {
       setIsFullscreenActive(active);
@@ -46,9 +56,25 @@ export function FullscreenFlashProvider({ children }: { children: React.ReactNod
     [flashAnim],
   );
 
+  const setStopCallback = useCallback((fn: (() => void) | null) => {
+    stopCbRef.current = fn;
+  }, []);
+
+  const callStop = useCallback(() => {
+    stopCbRef.current?.();
+  }, []);
+
   return (
     <FullscreenFlashContext.Provider
-      value={{ flashAnim, isFullscreenActive, setFullscreenActive, flashColor, setFlashColor }}
+      value={{
+        flashAnim,
+        isFullscreenActive,
+        setFullscreenActive,
+        flashColor,
+        setFlashColor,
+        setStopCallback,
+        callStop,
+      }}
     >
       {children}
     </FullscreenFlashContext.Provider>
