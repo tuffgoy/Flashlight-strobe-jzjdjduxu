@@ -1,17 +1,16 @@
 /**
  * FullscreenFlashContext
  *
- * Provides an Animated.Value that controls a full-screen white flash overlay
- * rendered at the root layout level (above the tab bar / nav bar).
+ * Provides the shared state for the full-screen flash overlay rendered at root
+ * layout level (above the tab bar / nav bar).
  *
- * The strobe screen sets the value directly via setValue(0|1) so there is
- * zero React render overhead during strobing — the animation runs entirely
- * on the native thread.
- *
- * isFullscreenActive controls whether the Modal in _layout.tsx is mounted.
- * It must be set to true before strobing starts in fullscreen mode, and false
- * when strobing stops.  Keeping the Modal unmounted when not needed prevents
- * the startup crash caused by a permanently-mounted transparent Modal.
+ * - flashAnim: Animated.Value (0=off, 1=on) — set directly via setValue so
+ *   there is zero React render overhead during strobing.
+ * - isFullscreenActive: boolean — true only while actively strobing in fullscreen
+ *   mode.  The Modal in _layout.tsx only mounts when this is true to prevent
+ *   the startup crash caused by a permanently-mounted transparent Modal.
+ * - flashColor: the current screen flash color (hex string), shared between
+ *   the safearea overlay (index.tsx) and the fullscreen Modal (_layout.tsx).
  */
 
 import React, {
@@ -25,10 +24,11 @@ import { Animated } from "react-native";
 
 interface FullscreenFlashContextType {
   flashAnim: Animated.Value;
-  /** True only while the strobe is running in fullscreen screen-flash mode. */
   isFullscreenActive: boolean;
-  /** Call with true to mount the overlay Modal; false to unmount it. */
   setFullscreenActive: (active: boolean) => void;
+  /** Current screen flash color, hex string. Default: "#ffffff" */
+  flashColor: string;
+  setFlashColor: (color: string) => void;
 }
 
 const FullscreenFlashContext = createContext<FullscreenFlashContextType | null>(null);
@@ -36,6 +36,7 @@ const FullscreenFlashContext = createContext<FullscreenFlashContextType | null>(
 export function FullscreenFlashProvider({ children }: { children: React.ReactNode }) {
   const flashAnim = useRef(new Animated.Value(0)).current;
   const [isFullscreenActive, setIsFullscreenActive] = useState(false);
+  const [flashColor, setFlashColor] = useState("#ffffff");
 
   const setFullscreenActive = useCallback(
     (active: boolean) => {
@@ -47,7 +48,7 @@ export function FullscreenFlashProvider({ children }: { children: React.ReactNod
 
   return (
     <FullscreenFlashContext.Provider
-      value={{ flashAnim, isFullscreenActive, setFullscreenActive }}
+      value={{ flashAnim, isFullscreenActive, setFullscreenActive, flashColor, setFlashColor }}
     >
       {children}
     </FullscreenFlashContext.Provider>
