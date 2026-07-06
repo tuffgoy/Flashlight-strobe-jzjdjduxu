@@ -9,6 +9,11 @@
  * Permission is owned by the parent (single source of truth) and passed
  * as a prop so we never have two concurrent useCameraPermissions() hooks.
  *
+ * `enabled` prop: pass false when the current flash mode does not require
+ * the torch (e.g. screen-only mode).  This prevents the camera sensor from
+ * activating unnecessarily, avoiding the camera-in-use indicator in the
+ * Android notification bar when torch is not needed.
+ *
  * Torch fix: use useReducer with a sequence counter instead of useState.
  * The counter ensures each dispatch produces a new state object, which
  * forces a re-render even when the boolean value hasn't changed — defeating
@@ -26,6 +31,8 @@ export interface TorchCameraHandle {
 
 interface TorchCameraProps {
   permissionGranted: boolean;
+  /** Set to false to prevent camera activation when torch is not needed. Defaults to true. */
+  enabled?: boolean;
 }
 
 type TorchState = { on: boolean; seq: number };
@@ -35,7 +42,7 @@ function torchReducer(prev: TorchState, on: boolean): TorchState {
 }
 
 export const TorchCamera = React.forwardRef<TorchCameraHandle, TorchCameraProps>(
-  function TorchCamera({ permissionGranted }, ref) {
+  function TorchCamera({ permissionGranted, enabled = true }, ref) {
     "use no memo";
     const [{ on: torchOn }, dispatch] = useReducer(torchReducer, { on: false, seq: 0 });
 
@@ -46,9 +53,8 @@ export const TorchCamera = React.forwardRef<TorchCameraHandle, TorchCameraProps>
     );
 
     // Web has no hardware torch — parent handles screen-flash overlay.
-    // Only render when permission is granted so CameraView never shows an
-    // uninitialised camera frame to the user.
-    if (Platform.OS === "web" || !permissionGranted) return null;
+    // Only render when permission is granted AND torch is actually needed.
+    if (Platform.OS === "web" || !permissionGranted || !enabled) return null;
 
     return (
       <CameraView
