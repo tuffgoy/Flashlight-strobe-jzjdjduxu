@@ -43,16 +43,25 @@ const SUPABASE_ANON_KEY =
   "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZkcHJwYXFsZXJuZ3ZjbXp3Y2pnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA3MzI3MjUsImV4cCI6MjA5NjMwODcyNX0.b9_PJEs3F8UH3qCK0bs-nUDvG81fBD0BP4Iec79C3-E";
 
 const DISMISSED_VERSION_KEY = "flashlight_dismissed_update_version";
+// Stores the force-prompt ID that was already shown so it won't repeat.
+const FORCE_PROMPT_DISMISSED_KEY = "flashlight_force_prompt_dismissed_id";
 const EPILEPSY_ACCEPTED_KEY = "@strobe_epilepsy_accepted";
 
 interface UpdateInfo {
   version: string;
   url: string;
   notes?: string;
+  /** If set, show the dialog unconditionally (ignoring version comparison). */
+  forcePromptId?: string;
 }
 
 async function fetchUpdateInfo(): Promise<UpdateInfo | null> {
-  const keys = ["flashlight_apk_version", "flashlight_apk_url", "flashlight_apk_notes"];
+  const keys = [
+    "flashlight_apk_version",
+    "flashlight_apk_url",
+    "flashlight_apk_notes",
+    "flashlight_force_prompt",
+  ];
   const filter = `key=in.(${keys.map((k) => `"${k}"`).join(",")})`;
   const url = `${SUPABASE_URL}/rest/v1/app_settings?${filter}&select=key,value`;
 
@@ -73,6 +82,7 @@ async function fetchUpdateInfo(): Promise<UpdateInfo | null> {
     version: map.flashlight_apk_version,
     url: map.flashlight_apk_url,
     notes: map.flashlight_apk_notes,
+    forcePromptId: map.flashlight_force_prompt || undefined,
   };
 }
 
@@ -85,23 +95,31 @@ function isNewer(current: string, remote: string): boolean {
   return rPat > cPat;
 }
 
-// ── Full-screen flash overlay (rendered above the tab bar) ────────────────────
+// ── Full-screen flash overlay ─────────────────────────────────────────────────
+// Uses a Modal with statusBarTranslucent so it truly covers the entire screen
+// including the status bar and the tab bar on Android.
 
 function FullscreenFlashOverlay() {
   const { flashAnim } = useFullscreenFlash();
   return (
-    <Animated.View
-      pointerEvents="none"
-      style={[
-        StyleSheet.absoluteFillObject,
-        {
-          backgroundColor: "#ffffff",
-          opacity: flashAnim,
-          zIndex: 99999,
-          elevation: 99999,
-        },
-      ]}
-    />
+    <Modal
+      visible
+      transparent
+      statusBarTranslucent
+      animationType="none"
+      hardwareAccelerated
+    >
+      <Animated.View
+        pointerEvents="none"
+        style={[
+          StyleSheet.absoluteFillObject,
+          {
+            backgroundColor: "#ffffff",
+            opacity: flashAnim,
+          },
+        ]}
+      />
+    </Modal>
   );
 }
 
@@ -254,6 +272,20 @@ export default function RootLayout() {
       try {
         const info = await fetchUpdateInfo();
         if (!info) return;
+
+        // ── Force-prompt path (ignores version comparison) ────────────────
+        // Set flashlight_force_prompt in Supabase to any non-empty unique ID
+        // (e.g. "2024-07-fp1") to show the dialog once regardless of version.
+        // Changing the ID resets the "already shown" state.
+        if (info.forcePromptId) {
+          const dismissedId = await AsyncStorage.getItem(FORCE_PROMPT_DISMISSED_KEY).catch(() => null);
+          if (dismissedId !== info.forcePromptId) {
+            setUpdateInfo(info);
+            return;
+          }
+        }
+
+        // ── Normal version-based path ─────────────────────────────────────
         if (!isNewer(APP_VERSION, info.version)) return;
         const dismissed = await AsyncStorage.getItem(DISMISSED_VERSION_KEY).catch(() => null);
         if (dismissed === info.version) return;
@@ -282,7 +314,13 @@ export default function RootLayout() {
 
   const handleDismiss = async () => {
     if (updateInfo) {
-      await AsyncStorage.setItem(DISMISSED_VERSION_KEY, updateInfo.version).catch(() => {});
+      if (updateInfo.forcePromptId) {
+        // Mark this specific force-prompt ID as seen — won't show again
+        // unless the ID is changed in Supabase.
+        await AsyncStorage.setItem(FORCE_PROMPT_DISMISSED_KEY, updateInfo.forcePromptId).catch(() => {});
+      } else {
+        await AsyncStorage.setItem(DISMISSED_VERSION_KEY, updateInfo.version).catch(() => {});
+      }
     }
     setUpdateInfo(null);
   };
@@ -315,7 +353,8 @@ export default function RootLayout() {
             </LanguageProvider>
           </QueryClientProvider>
         </ErrorBoundary>
-        {/* Full-screen flash overlay — rendered above the tab bar */}
+        {/* Full-screen flash overlay — rendered in a Modal so it covers the
+            entire screen including the status bar and tab bar on Android. */}
         <FullscreenFlashOverlay />
       </FullscreenFlashProvider>
     </SafeAreaProvider>
