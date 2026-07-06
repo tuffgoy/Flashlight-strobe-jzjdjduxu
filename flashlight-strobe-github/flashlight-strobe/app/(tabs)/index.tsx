@@ -114,25 +114,49 @@ export default function StrobeScreen() {
     setFullscreenActive,
     flashColor,
     setFlashColor,
+    setStopCallback,
   } = useFullscreenFlash();
 
   const isFullscreenRef = useRef(false);
   const setFullscreenActiveRef = useRef(setFullscreenActive);
   setFullscreenActiveRef.current = setFullscreenActive;
 
+  // Register the stop callback once so the fullscreen overlay can stop the strobe.
+  useEffect(() => {
+    setStopCallback(() => setIsActive(false));
+    return () => setStopCallback(null);
+  // setStopCallback is stable (useCallback with no deps)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // ── Hz slider ──────────────────────────────────────────────────────────────
   const sliderWidth = useRef(1);
+  const scrollRef = useRef<ScrollView>(null);
+
   const sliderPan = useRef(
     PanResponder.create({
+      // Capture mode: grab the gesture before the ScrollView can steal it.
       onStartShouldSetPanResponder: () => true,
       onMoveShouldSetPanResponder: () => true,
+      onStartShouldSetPanResponderCapture: () => true,
+      onMoveShouldSetPanResponderCapture: () => true,
+      // Don't let ScrollView steal the gesture back mid-drag.
+      onPanResponderTerminationRequest: () => false,
       onPanResponderGrant: (evt) => {
+        // Freeze the ScrollView while the user is dragging the slider.
+        scrollRef.current?.setNativeProps({ scrollEnabled: false });
         const ratio = Math.max(0, Math.min(1, evt.nativeEvent.locationX / sliderWidth.current));
         setHz(parseFloat((MIN_HZ + ratio * (MAX_HZ - MIN_HZ)).toFixed(1)));
       },
       onPanResponderMove: (evt) => {
         const ratio = Math.max(0, Math.min(1, evt.nativeEvent.locationX / sliderWidth.current));
         setHz(parseFloat((MIN_HZ + ratio * (MAX_HZ - MIN_HZ)).toFixed(1)));
+      },
+      onPanResponderRelease: () => {
+        scrollRef.current?.setNativeProps({ scrollEnabled: true });
+      },
+      onPanResponderTerminate: () => {
+        scrollRef.current?.setNativeProps({ scrollEnabled: true });
       },
     })
   ).current;
@@ -315,16 +339,23 @@ export default function StrobeScreen() {
 
   return (
     <View style={styles.root}>
-      {/* Safe-area screen flash overlay (not fullscreen mode) */}
-      <Animated.View
-        pointerEvents="none"
-        style={[styles.flashOverlay, { opacity: flashAnim, backgroundColor: flashColor }]}
-      />
+      {/*
+       * Safe-area screen flash overlay.
+       * Wrapped in a plain View with pointerEvents="none" so touches reliably
+       * pass through on Android — setting pointerEvents only on Animated.View
+       * is unreliable on Android when the view is fully opaque.
+       */}
+      <View pointerEvents="none" style={StyleSheet.absoluteFillObject}>
+        <Animated.View
+          style={[StyleSheet.absoluteFillObject, { opacity: flashAnim, backgroundColor: flashColor }]}
+        />
+      </View>
 
       {/* Torch controller — react-native-torch, no camera session or indicator */}
       <TorchCamera ref={torchRef} enabled={torchNeeded} />
 
       <ScrollView
+        ref={scrollRef}
         contentContainerStyle={styles.scroll}
         showsVerticalScrollIndicator={false}
         scrollEventThrottle={16}
