@@ -2,27 +2,27 @@
 ║          FLASHLIGHT STROBE  ·  APP INFO & HEALTH               ║
 ╚══════════════════════════════════════════════════════════════════╝
 
-  Generated   : 2026-07-06 20:43:02 UTC
-  Trigger     : push  (by tuffgoy)  ·  Run #1
-  Run URL     : https://github.com/tuffgoy/Flashlight-strobe-jzjdjduxu/actions/runs/28821924210
+  Generated   : 2026-07-06 21:06:09 UTC
+  Trigger     : push  (by tuffgoy)  ·  Run #2
+  Run URL     : https://github.com/tuffgoy/Flashlight-strobe-jzjdjduxu/actions/runs/28823262134
 
 ─── VERSION ───────────────────────────────────────────────────────
   App Version : 1.5.0
-  versionCode : 1         (Android Play Store build number)
+  versionCode : 2         (Android Play Store build number)
   Bump Type   : auto (push)
   EAS Source  : ✓  local  (reads version from app.json)
 
 ─── GIT ───────────────────────────────────────────────────────────
   Branch         : main
-  Commit         : c749781  (c749781ceed3aba1497fcfb20fdba196ccbdacb3)
-  Author         : Replit Agent <agent@replit.com>
-  Message        : fix(build): resolve New Arch vs torch conflict
-  Committed      : 2026-07-06 20:42:51 +0000
-  Changed files  : 3
-  Total commits  : 152
-  Contributors   : 5 unique author(s)
+  Commit         : 591138b  (591138bbe836cbb550051bdefc769b9ff37d53fc)
+  Author         : 106goodgoy <61836695-106goodgoy@users.noreply.replit.com>
+  Message        : fix: bump APP_VERSION to 1.5.0 in settings.tsx
+  Committed      : 2026-07-06 21:05:56 +0000
+  Changed files  : 1
+  Total commits  : 154
+  Contributors   : 6 unique author(s)
   Last tag       : none
-  Commits since tag: 152
+  Commits since tag: 154
   Repo since     : 2026-06-30 23:38:14 +0200
 
 ─── CODEBASE ──────────────────────────────────────────────────────
@@ -52,7 +52,7 @@
   New Architecture    : ✓  ENABLED
   React Compiler      : —  DISABLED
   Typed Routes        : ✓  ENABLED
-  Android versionCode : ✓  SET (1)
+  Android versionCode : ✓  SET (2)
   Torch compatibility : —  not installed
   Release build opt.  : ✓  Proguard + resource shrinking ENABLED
 
