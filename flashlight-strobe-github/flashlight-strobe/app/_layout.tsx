@@ -127,7 +127,7 @@ function isBelowMin(current: string, min: string): boolean {
 // startup crash from a permanently-mounted transparent Modal.
 
 function FullscreenFlashOverlay() {
-  const { flashAnim, isFullscreenActive, flashColor } = useFullscreenFlash();
+  const { flashAnim, isFullscreenActive, flashColor, callStop } = useFullscreenFlash();
   if (!isFullscreenActive) return null;
   return (
     <Modal
@@ -137,16 +137,51 @@ function FullscreenFlashOverlay() {
       animationType="none"
       hardwareAccelerated
     >
-      <Animated.View
-        pointerEvents="none"
-        style={[
-          StyleSheet.absoluteFillObject,
-          { backgroundColor: flashColor, opacity: flashAnim },
-        ]}
-      />
+      {/*
+       * The Pressable fills the screen so the user can TAP ANYWHERE to stop.
+       * The flash Animated.View has pointerEvents="none" so taps fall through
+       * to the Pressable beneath it.
+       */}
+      <Pressable style={StyleSheet.absoluteFillObject} onPress={callStop}>
+        <Animated.View
+          pointerEvents="none"
+          style={[
+            StyleSheet.absoluteFillObject,
+            { backgroundColor: flashColor, opacity: flashAnim },
+          ]}
+        />
+        {/* Tap-to-stop hint — semi-dark bg so it's visible over any flash colour */}
+        <View pointerEvents="none" style={ovl.hintWrap}>
+          <View style={ovl.hintPill}>
+            <Text style={ovl.hintText}>■  TAP TO STOP</Text>
+          </View>
+        </View>
+      </Pressable>
     </Modal>
   );
 }
+
+const ovl = StyleSheet.create({
+  hintWrap: {
+    position: "absolute",
+    bottom: 48,
+    left: 0,
+    right: 0,
+    alignItems: "center",
+  },
+  hintPill: {
+    backgroundColor: "rgba(0,0,0,0.55)",
+    borderRadius: 20,
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+  },
+  hintText: {
+    color: "#fff",
+    fontSize: 13,
+    fontFamily: "Inter_700Bold",
+    letterSpacing: 1.5,
+  },
+});
 
 // ── Blocking minimum-version dialog ──────────────────────────────────────────
 
