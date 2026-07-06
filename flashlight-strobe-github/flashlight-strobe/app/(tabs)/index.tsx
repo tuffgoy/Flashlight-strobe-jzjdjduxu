@@ -17,9 +17,14 @@
  *  - react-native-torch calls CameraManager.setTorchMode() directly — no
  *    camera session, no camera-in-use indicator on Android.
  *  - Drift-correcting scheduler: each tick is scheduled relative to an absolute
- *    epoch so phase slip cannot accumulate over many cycles.
+ *    epoch so phase slip cannot accumulate over many cycles. Hz and flashMode
+ *    are read from refs inside the tick so Hz can change without restarting the
+ *    engine (no gap in the strobe when the user drags the slider).
  *  - Wake lock keeps the screen on while strobing.
  *  - Auto-stop timer cuts the strobe after a chosen duration.
+ *
+ * Hz slider uses a LOGARITHMIC scale so the low-Hz range (0.5–5 Hz, where
+ * differences are most perceptible) gets proportionally more slider travel.
  */
 
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -80,6 +85,21 @@ function fmtTimer(secs: number): string {
   return m > 0 ? `${m}:${String(s).padStart(2, "0")}` : `${s}s`;
 }
 
+// ── Logarithmic Hz scale helpers ───────────────────────────────────────────
+// Using log scale gives the low-Hz range more travel on the slider, matching
+// how humans perceive frequency differences (each octave feels equally spaced).
+const LOG_MIN = Math.log(MIN_HZ);
+const LOG_MAX = Math.log(MAX_HZ);
+
+function hzToRatio(hz: number): number {
+  return (Math.log(Math.max(MIN_HZ, hz)) - LOG_MIN) / (LOG_MAX - LOG_MIN);
+}
+
+function ratioToHz(ratio: number): number {
+  const raw = Math.exp(LOG_MIN + clamp(ratio, 0, 1) * (LOG_MAX - LOG_MIN));
+  return parseFloat(raw.toFixed(1));
+}
+
 export default function StrobeScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
@@ -117,7 +137,17 @@ export default function StrobeScreen() {
     setStopCallback,
   } = useFullscreenFlash();
 
+  // ── Refs for strobe engine (read inside tick without re-running the effect) ──
   const isFullscreenRef = useRef(false);
+  const isActiveRef = useRef(isActive);
+  isActiveRef.current = isActive;
+  const hzRef = useRef(hz);
+  hzRef.current = hz;
+  const flashModeRef = useRef(flashMode);
+  flashModeRef.current = flashMode;
+  const flashColorRef = useRef(flashColor);
+  flashColorRef.current = flashColor;
+
   const setFullscreenActiveRef = useRef(setFullscreenActive);
   setFullscreenActiveRef.current = setFullscreenActive;
 
@@ -135,25 +165,29 @@ export default function StrobeScreen() {
 
   const sliderPan = useRef(
     PanResponder.create({
-      // Capture mode: grab the gesture before the ScrollView can steal it.
+      // Only capture if the gesture is primarily horizontal — this lets the
+      // ScrollView still handle vertical scrolls that pass over the slider.
       onStartShouldSetPanResponder: () => true,
-      onMoveShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: (_, gs) =>
+        Math.abs(gs.dx) > Math.abs(gs.dy),
       onStartShouldSetPanResponderCapture: () => true,
-      onMoveShouldSetPanResponderCapture: () => true,
+      onMoveShouldSetPanResponderCapture: (_, gs) =>
+        Math.abs(gs.dx) > Math.abs(gs.dy),
       // Don't let ScrollView steal the gesture back mid-drag.
       onPanResponderTerminationRequest: () => false,
       onPanResponderGrant: (evt) => {
         // Freeze the ScrollView while the user is dragging the slider.
         scrollRef.current?.setNativeProps({ scrollEnabled: false });
-        const ratio = Math.max(0, Math.min(1, evt.nativeEvent.locationX / sliderWidth.current));
-        setHz(parseFloat((MIN_HZ + ratio * (MAX_HZ - MIN_HZ)).toFixed(1)));
+        const ratio = clamp(evt.nativeEvent.locationX / sliderWidth.current, 0, 1);
+        setHz(ratioToHz(ratio));
       },
       onPanResponderMove: (evt) => {
-        const ratio = Math.max(0, Math.min(1, evt.nativeEvent.locationX / sliderWidth.current));
-        setHz(parseFloat((MIN_HZ + ratio * (MAX_HZ - MIN_HZ)).toFixed(1)));
+        const ratio = clamp(evt.nativeEvent.locationX / sliderWidth.current, 0, 1);
+        setHz(ratioToHz(ratio));
       },
       onPanResponderRelease: () => {
         scrollRef.current?.setNativeProps({ scrollEnabled: true });
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
       },
       onPanResponderTerminate: () => {
         scrollRef.current?.setNativeProps({ scrollEnabled: true });
@@ -209,12 +243,22 @@ export default function StrobeScreen() {
       if (v === "fullscreen" || v === "safearea") setScreenFlashArea(v);
     }).catch(() => {});
   }, []);
+
   useEffect(() => {
     AsyncStorage.setItem("strobe_screen_flash_area", screenFlashArea).catch(() => {});
     isFullscreenRef.current = screenFlashArea === "fullscreen";
+    // Reset both animation values when area changes to avoid ghost overlays
     flashAnim.setValue(0);
     fullscreenFlashAnim.setValue(0);
-    if (!isActive) setFullscreenActiveRef.current(false);
+    // If strobe is already running, update the modal state to match the new area.
+    // If switching TO fullscreen while active (and mode uses screen), activate it.
+    // If switching AWAY from fullscreen while active, deactivate the modal.
+    const useScreen = flashModeRef.current !== "torch";
+    if (isActiveRef.current) {
+      setFullscreenActiveRef.current(screenFlashArea === "fullscreen" && useScreen);
+    } else {
+      setFullscreenActiveRef.current(false);
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [screenFlashArea]);
 
@@ -251,7 +295,14 @@ export default function StrobeScreen() {
     return () => clearInterval(id);
   }, [isActive, timerPresetIdx]);
 
-  // ── Strobe engine (drift-correcting) ──────────────────────────────────────
+  // ── Strobe engine (drift-correcting, ref-based) ───────────────────────────
+  //
+  // Hz and flashMode are read from refs inside tick() so that:
+  //   a) The user can drag the Hz slider without stopping/restarting the strobe.
+  //   b) Switching flash mode takes effect on the next half-period boundary.
+  //
+  // The epoch is recalibrated whenever Hz changes by > 1% so that the
+  // tickCount * halfPeriod accounting doesn't drift wildly when jumping Hz.
   useEffect(() => {
     if (!isActive) {
       torchRef.current?.setTorch(false);
@@ -263,21 +314,42 @@ export default function StrobeScreen() {
 
     sessionStart.current = Date.now();
 
-    const halfPeriod = (1000 / hz) / 2;
-    const useTorch = flashMode !== "screen";
-    const useScreen = flashMode !== "torch" || Platform.OS === "web";
-    const fullscreen = isFullscreenRef.current && useScreen;
+    // Activate the fullscreen modal now if needed (it only shows when active).
+    const initialUseScreen = flashModeRef.current !== "torch" || Platform.OS === "web";
+    if (isFullscreenRef.current && initialUseScreen) {
+      setFullscreenActiveRef.current(true);
+    }
 
-    if (fullscreen) setFullscreenActiveRef.current(true);
-
-    let timeoutId: ReturnType<typeof setTimeout>;
     let alive = true;
-    const epoch = Date.now();
+    let timeoutId: ReturnType<typeof setTimeout>;
+    let epoch = Date.now();
     let tickCount = 0;
+    let prevHz = hzRef.current;
 
     function tick() {
       if (!alive) return;
+
+      const currentHz = hzRef.current;
+      const currentMode = flashModeRef.current;
+      const useTorch = currentMode !== "screen";
+      const useScreen = currentMode !== "torch" || Platform.OS === "web";
+
+      // If Hz changed by more than 1%, reset the epoch so the scheduler
+      // doesn't try to "catch up" a large backlog of missed half-periods.
+      if (Math.abs(currentHz - prevHz) / prevHz > 0.01) {
+        epoch = Date.now();
+        tickCount = 0;
+        prevHz = currentHz;
+      }
+
+      // Manage fullscreen modal: keep it in sync if the user changed the
+      // flash mode or screen-area setting while the strobe was running.
+      const wantFullscreen = isFullscreenRef.current && useScreen;
+      setFullscreenActiveRef.current(wantFullscreen);
+
+      const halfPeriod = (1000 / currentHz) / 2;
       const on = tickCount % 2 === 0;
+
       if (useTorch) torchRef.current?.setTorch(on);
       if (useScreen) {
         const val = on ? 1 : 0;
@@ -288,9 +360,16 @@ export default function StrobeScreen() {
           flashAnim.setValue(val);
           fullscreenFlashAnim.setValue(0);
         }
+      } else {
+        // Torch-only mode — clear screen flash if it was on before.
+        flashAnim.setValue(0);
+        fullscreenFlashAnim.setValue(0);
       }
+
       tickCount++;
-      const delay = Math.max(0, epoch + tickCount * halfPeriod - Date.now());
+      // Schedule next tick with drift correction; minimum 1 ms to avoid
+      // setTimeout(fn, 0) busy-looping at the JS engine limit.
+      const delay = Math.max(1, epoch + tickCount * halfPeriod - Date.now());
       timeoutId = setTimeout(tick, delay);
     }
 
@@ -299,7 +378,7 @@ export default function StrobeScreen() {
     return () => {
       alive = false;
       clearTimeout(timeoutId);
-      if (useTorch) torchRef.current?.setTorch(false);
+      torchRef.current?.setTorch(false);
       flashAnim.setValue(0);
       fullscreenFlashAnim.setValue(0);
       setFullscreenActiveRef.current(false);
@@ -308,18 +387,20 @@ export default function StrobeScreen() {
         if (durationMs > 2000) {
           logSessionRef.current({
             timestamp: sessionStart.current,
-            mode: flashMode,
-            hz,
+            mode: flashModeRef.current,
+            hz: hzRef.current,
             dutyCycle: 50,
-            color: flashColor,
+            color: flashColorRef.current,
             durationMs,
           });
         }
         sessionStart.current = null;
       }
     };
+  // hz and flashMode are intentionally excluded — they're read via refs so
+  // the engine runs continuously without restarting on every slider drag.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isActive, hz, flashMode, flashAnim, fullscreenFlashAnim]);
+  }, [isActive, flashAnim, fullscreenFlashAnim]);
 
   const handleToggle = () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
@@ -331,7 +412,10 @@ export default function StrobeScreen() {
 
   const timerPreset = TIMER_PRESETS[timerPresetIdx];
   const styles = makeStyles(colors, insets);
-  const fillPct = `${((hz - MIN_HZ) / (MAX_HZ - MIN_HZ)) * 100}%` as any;
+
+  // Log-scale position of the slider thumb (0–100%).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const fillPct = `${hzToRatio(hz) * 100}%` as any;
 
   // Torch only needs to be active when flash mode uses the LED
   const torchNeeded = flashMode !== "screen";
@@ -388,10 +472,11 @@ export default function StrobeScreen() {
           <Text style={styles.subText}>
             {[t.hzVerySlowLabel, t.hzSlowLabel, t.hzMediumLabel, t.hzFastLabel, t.hzRapidLabel, t.hzUltraLabel][hzLabelKey(hz)]}
           </Text>
+          {/* Log-scale slider track */}
           <View
             style={styles.sliderTrack}
             onLayout={(e) => { sliderWidth.current = e.nativeEvent.layout.width || 1; }}
-            hitSlop={{ top: 16, bottom: 16 }}
+            hitSlop={{ top: 20, bottom: 20 }}
             {...sliderPan.panHandlers}
           >
             <View style={[styles.sliderFill, { width: fillPct }]} />
@@ -502,15 +587,15 @@ export default function StrobeScreen() {
                       {area === "safearea" ? "▣" : "⬛"}
                     </Text>
                     <Text style={[styles.modeLbl, screenFlashArea === area && styles.modeLblActive]}>
-                      {area === "safearea" ? "Safe Area" : "Fullscreen"}
+                      {area === "safearea" ? "Above Bar" : "Fullscreen"}
                     </Text>
                   </Pressable>
                 ))}
               </View>
               <Text style={styles.subText}>
                 {screenFlashArea === "fullscreen"
-                  ? "Flash covers the entire screen including tab bar"
-                  : "Flash covers the content area only"}
+                  ? "Flash covers the entire screen. Tap anywhere or use the stop button to deactivate."
+                  : "Flash covers the content area above the tab bar"}
               </Text>
 
               {/* Flash color picker */}
@@ -596,64 +681,53 @@ export default function StrobeScreen() {
   );
 }
 
-function makeStyles(
-  colors: ReturnType<typeof import("@/hooks/useColors").useColors>,
-  insets: ReturnType<typeof useSafeAreaInsets>
-) {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function makeStyles(colors: any, insets: { top: number; bottom: number; left: number; right: number }) {
   return StyleSheet.create({
     root: { flex: 1, backgroundColor: colors.background },
-    flashOverlay: {
-      ...StyleSheet.absoluteFillObject,
-      zIndex: 10,
-      pointerEvents: "none",
-    } as any,
+    sectionLabel: {
+      fontSize: 10, fontFamily: "Inter_700Bold", color: colors.mutedForeground,
+      letterSpacing: 2, paddingHorizontal: 2,
+    },
     scroll: {
       paddingHorizontal: 16,
-      paddingTop: insets.top + 16,
-      paddingBottom: insets.bottom + 100,
-      alignItems: "center",
-      gap: 16,
-    },
-    sectionLabel: {
-      fontSize: 10,
-      fontFamily: "Inter_700Bold",
-      color: colors.mutedForeground,
-      letterSpacing: 3,
-      alignSelf: "flex-start",
+      paddingTop: 16,
+      paddingBottom: insets.bottom + 32,
+      gap: 12,
     },
     buttonWrap: {
-      width: 160, height: 160,
-      alignItems: "center", justifyContent: "center",
-      marginVertical: 8,
+      width: "100%", alignItems: "center", paddingVertical: 8,
     },
     mainBtn: {
-      width: 150, height: 150, borderRadius: 75,
+      width: 160, height: 160, borderRadius: 80,
       backgroundColor: colors.card, borderWidth: 2, borderColor: colors.border,
-      alignItems: "center", justifyContent: "center", gap: 2,
+      alignItems: "center", justifyContent: "center", gap: 6,
     },
     mainBtnActive: { backgroundColor: colors.primary, borderColor: colors.primary },
     btnIcon: { fontSize: 36 },
-    btnLabel: { fontSize: 14, fontFamily: "Inter_700Bold", color: colors.foreground, letterSpacing: 2 },
+    btnLabel: { fontSize: 20, fontFamily: "Inter_700Bold", color: colors.foreground },
     btnLabelActive: { color: colors.primaryForeground },
-    countdownText: { fontSize: 11, fontFamily: "Inter_500Medium", color: colors.primaryForeground, opacity: 0.8 },
+    countdownText: { fontSize: 12, fontFamily: "Inter_400Regular", color: colors.primaryForeground },
     card: {
       width: "100%", backgroundColor: colors.card,
       borderRadius: colors.radius, borderWidth: 1, borderColor: colors.border,
-      padding: 16, gap: 10,
+      padding: 14, gap: 10,
     },
     cardLabel: { fontSize: 10, fontFamily: "Inter_700Bold", color: colors.mutedForeground, letterSpacing: 2 },
     bigVal: { fontSize: 36, fontFamily: "Inter_700Bold", color: colors.foreground },
     subText: { fontSize: 12, fontFamily: "Inter_400Regular", color: colors.mutedForeground },
     divider: { height: 1, backgroundColor: colors.border, marginVertical: 2 },
     sliderTrack: {
-      width: "100%", height: 8, backgroundColor: colors.muted,
-      borderRadius: 4, overflow: "visible" as any, justifyContent: "center",
+      height: 8, backgroundColor: colors.muted, borderRadius: 4,
+      overflow: "visible", position: "relative",
     },
     sliderFill: { height: "100%", backgroundColor: colors.primary, borderRadius: 4 },
     sliderThumb: {
-      position: "absolute", width: 20, height: 20, borderRadius: 10,
+      position: "absolute", width: 24, height: 24, borderRadius: 12,
       backgroundColor: colors.primary, borderWidth: 3, borderColor: colors.background,
-      top: -6, marginLeft: -10, elevation: 2,
+      top: -8, marginLeft: -12, elevation: 4,
+      shadowColor: "#000", shadowOffset: { width: 0, height: 2 },
+      shadowOpacity: 0.25, shadowRadius: 4,
     },
     adjRow: { flexDirection: "row", gap: 6 },
     adjBtn: {

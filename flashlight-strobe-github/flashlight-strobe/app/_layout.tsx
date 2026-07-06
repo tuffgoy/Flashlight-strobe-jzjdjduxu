@@ -138,11 +138,21 @@ function FullscreenFlashOverlay() {
       hardwareAccelerated
     >
       {/*
-       * The Pressable fills the screen so the user can TAP ANYWHERE to stop.
-       * The flash Animated.View has pointerEvents="none" so taps fall through
-       * to the Pressable beneath it.
+       * Touch detection strategy:
+       *   1. The root View uses the low-level responder system
+       *      (onStartShouldSetResponder + onResponderGrant) which is the most
+       *      reliable way to catch touches in an Android Modal — it bypasses
+       *      Pressable's internal delay and RNGH conflicts.
+       *   2. The flash Animated.View has pointerEvents="none" so it never
+       *      absorbs touches.
+       *   3. A permanently-visible stop button at the bottom provides a clear
+       *      tap target even when the flash is at full brightness.
        */}
-      <Pressable style={StyleSheet.absoluteFillObject} onPress={callStop}>
+      <View
+        style={StyleSheet.absoluteFillObject}
+        onStartShouldSetResponder={() => true}
+        onResponderGrant={callStop}
+      >
         <Animated.View
           pointerEvents="none"
           style={[
@@ -150,34 +160,37 @@ function FullscreenFlashOverlay() {
             { backgroundColor: flashColor, opacity: flashAnim },
           ]}
         />
-        {/* Tap-to-stop hint — semi-dark bg so it's visible over any flash colour */}
-        <View pointerEvents="none" style={ovl.hintWrap}>
-          <View style={ovl.hintPill}>
-            <Text style={ovl.hintText}>■  TAP TO STOP</Text>
+
+        {/* Stop button — always visible regardless of flash state */}
+        <View pointerEvents="none" style={ovl.stopWrap}>
+          <View style={ovl.stopBtn}>
+            <Text style={ovl.stopBtnText}>■  TAP ANYWHERE TO STOP</Text>
           </View>
         </View>
-      </Pressable>
+      </View>
     </Modal>
   );
 }
 
 const ovl = StyleSheet.create({
-  hintWrap: {
+  stopWrap: {
     position: "absolute",
-    bottom: 48,
+    bottom: 60,
     left: 0,
     right: 0,
     alignItems: "center",
   },
-  hintPill: {
-    backgroundColor: "rgba(0,0,0,0.55)",
-    borderRadius: 20,
-    paddingHorizontal: 20,
-    paddingVertical: 10,
+  stopBtn: {
+    backgroundColor: "rgba(0,0,0,0.70)",
+    borderRadius: 24,
+    paddingHorizontal: 28,
+    paddingVertical: 14,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.15)",
   },
-  hintText: {
+  stopBtnText: {
     color: "#fff",
-    fontSize: 13,
+    fontSize: 14,
     fontFamily: "Inter_700Bold",
     letterSpacing: 1.5,
   },

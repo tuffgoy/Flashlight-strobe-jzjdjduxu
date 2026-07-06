@@ -7,7 +7,7 @@
     "icon": "./assets/images/icon.png",
     "scheme": "flashlight-strobe",
     "userInterfaceStyle": "dark",
-    "newArchEnabled": true,
+    "newArchEnabled": false,
     "splash": {
       "image": "./assets/images/icon.png",
       "resizeMode": "contain",
@@ -46,8 +46,7 @@
       "expo-av"
     ],
     "experiments": {
-      "typedRoutes": true,
-      "reactCompiler": true
+      "typedRoutes": true
     }
   }
 }
