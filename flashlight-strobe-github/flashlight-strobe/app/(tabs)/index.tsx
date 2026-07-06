@@ -9,7 +9,8 @@
  * Screen flash area (persisted in AsyncStorage):
  *  - "safearea"   → flash overlay covers only the content area above the tab bar
  *  - "fullscreen" → flash overlay covers the entire screen including the tab bar
- *                   (rendered at the root layout level via FullscreenFlashContext)
+ *                   (rendered at the root layout level via FullscreenFlashContext,
+ *                    using a Modal so the tab bar and status bar are also covered)
  *
  * Hz slider:
  *  - Drag left/right to set frequency, or tap +/- buttons / presets
@@ -23,8 +24,9 @@
  *  - TorchCamera is an isolated forwardRef component (1×1 off-screen).
  *    Only IT re-renders on each torch toggle.  Parent never re-renders
  *    at strobe frequency.
- *  - setTimeout chain: each ON→OFF and OFF→ON is a separate scheduled event;
- *    no batching, no phase drift.
+ *  - Drift-correcting scheduler: each tick computes the absolute expected
+ *    fire time so that cumulative setTimeout drift cannot cause phase slip
+ *    or missed beats at high frequencies.
  *  - Wake lock keeps the screen on while strobing.
  *  - Auto-stop timer cuts the strobe after a chosen duration.
  */
@@ -230,6 +232,12 @@ export default function StrobeScreen() {
   }, [isActive, timerPresetIdx]);
 
   // ── Strobe engine ──────────────────────────────────────────────────────────
+  //
+  // Drift-correcting scheduler: instead of scheduling each next tick as
+  // "N ms from now" (which accumulates drift), we track the absolute start
+  // time and compute when each half-period SHOULD fire.  This keeps the
+  // strobe phase stable across hundreds of cycles even at high frequencies.
+  //
   useEffect(() => {
     if (!isActive) {
       torchRef.current?.setTorch(false);
@@ -247,8 +255,16 @@ export default function StrobeScreen() {
     let timeoutId: ReturnType<typeof setTimeout>;
     let alive = true;
 
-    function tick(on: boolean) {
+    // Absolute reference epoch for drift correction
+    const epoch = Date.now();
+    // tickCount counts individual half-periods: even = ON, odd = OFF
+    let tickCount = 0;
+
+    function tick() {
       if (!alive) return;
+
+      const on = tickCount % 2 === 0;
+
       if (useTorch) torchRef.current?.setTorch(on);
       if (useScreen) {
         const val = on ? 1 : 0;
@@ -260,10 +276,17 @@ export default function StrobeScreen() {
           fullscreenFlashAnim.setValue(0);
         }
       }
-      timeoutId = setTimeout(() => tick(!on), halfPeriod);
+
+      tickCount++;
+
+      // Schedule next tick at the absolute expected time, not N ms from now.
+      // This eliminates cumulative drift that broke high-Hz strobing.
+      const nextExpected = epoch + tickCount * halfPeriod;
+      const delay = Math.max(0, nextExpected - Date.now());
+      timeoutId = setTimeout(tick, delay);
     }
 
-    tick(true);
+    tick();
 
     return () => {
       alive = false;
@@ -309,7 +332,7 @@ export default function StrobeScreen() {
 
   return (
     <View style={styles.root}>
-      {/* Screen flash overlay — safe-area mode */}
+      {/* Screen flash overlay — safe-area mode only */}
       <Animated.View
         pointerEvents="none"
         style={[styles.flashOverlay, { opacity: flashAnim }]}
@@ -321,6 +344,10 @@ export default function StrobeScreen() {
       <ScrollView
         contentContainerStyle={styles.scroll}
         showsVerticalScrollIndicator={false}
+        scrollEventThrottle={16}
+        keyboardShouldPersistTaps="handled"
+        overScrollMode="never"
+        bounces={false}
       >
         <Text style={styles.sectionLabel}>{t.strobe}</Text>
 
@@ -477,7 +504,7 @@ export default function StrobeScreen() {
             {flashMode === "torch"
               ? "Flashlight LED only"
               : flashMode === "screen"
-              ? `Screen flash only — ${screenFlashArea === "fullscreen" ? "full screen" : "above navigation"}`
+              ? `Screen flash only — ${screenFlashArea === "fullscreen" ? "full screen (incl. navigation)" : "above navigation"}`
               : "Flashlight LED + screen together"}
           </Text>
         </View>
