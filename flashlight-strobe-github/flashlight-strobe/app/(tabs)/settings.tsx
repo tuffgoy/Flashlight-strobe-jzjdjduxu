@@ -25,7 +25,7 @@ import { useColors } from "@/hooks/useColors";
 import { SessionLog, useLogger } from "@/hooks/useLogger";
 import { LANG_LABELS, LangCode } from "@/lib/translations";
 
-const APP_VERSION = "1.4.0";
+const APP_VERSION = "1.5.0";
 const EPILEPSY_KEY = "@strobe_epilepsy_accepted";
 const SCREEN_FLASH_AREA_KEY = "strobe_screen_flash_area";
 
