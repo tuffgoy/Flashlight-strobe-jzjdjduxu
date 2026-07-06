@@ -28,7 +28,8 @@
         "android.permission.RECORD_AUDIO"
       ],
       "enableProguardInReleaseBuilds": true,
-      "enableShrinkResourcesInReleaseBuilds": true
+      "enableShrinkResourcesInReleaseBuilds": true,
+      "versionCode": 1
     },
     "web": {
       "favicon": "./assets/images/icon.png"
