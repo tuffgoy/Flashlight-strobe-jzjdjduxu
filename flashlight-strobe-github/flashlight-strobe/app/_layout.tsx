@@ -43,7 +43,6 @@ const SUPABASE_ANON_KEY =
   "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZkcHJwYXFsZXJuZ3ZjbXp3Y2pnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA3MzI3MjUsImV4cCI6MjA5NjMwODcyNX0.b9_PJEs3F8UH3qCK0bs-nUDvG81fBD0BP4Iec79C3-E";
 
 const DISMISSED_VERSION_KEY = "flashlight_dismissed_update_version";
-// Stores the force-prompt ID that was already shown so it won't repeat.
 const FORCE_PROMPT_DISMISSED_KEY = "flashlight_force_prompt_dismissed_id";
 const EPILEPSY_ACCEPTED_KEY = "@strobe_epilepsy_accepted";
 
@@ -51,16 +50,24 @@ interface UpdateInfo {
   version: string;
   url: string;
   notes?: string;
-  /** If set, show the dialog unconditionally (ignoring version comparison). */
   forcePromptId?: string;
 }
 
-async function fetchUpdateInfo(): Promise<UpdateInfo | null> {
+interface MinVersionInfo {
+  minVersion: string;
+  url: string;
+}
+
+async function fetchUpdateInfo(): Promise<{
+  update: UpdateInfo | null;
+  minVersionInfo: MinVersionInfo | null;
+}> {
   const keys = [
     "flashlight_apk_version",
     "flashlight_apk_url",
     "flashlight_apk_notes",
     "flashlight_force_prompt",
+    "flashlight_min_version",
   ];
   const filter = `key=in.(${keys.map((k) => `"${k}"`).join(",")})`;
   const url = `${SUPABASE_URL}/rest/v1/app_settings?${filter}&select=key,value`;
@@ -71,36 +78,60 @@ async function fetchUpdateInfo(): Promise<UpdateInfo | null> {
       Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
     },
   });
-  if (!res.ok) return null;
+  if (!res.ok) return { update: null, minVersionInfo: null };
 
   const rows = (await res.json()) as Array<{ key: string; value: string }>;
   const map: Record<string, string> = {};
   for (const r of rows) map[r.key] = r.value;
 
-  if (!map.flashlight_apk_version || !map.flashlight_apk_url) return null;
-  return {
-    version: map.flashlight_apk_version,
-    url: map.flashlight_apk_url,
-    notes: map.flashlight_apk_notes,
-    forcePromptId: map.flashlight_force_prompt || undefined,
-  };
+  const update: UpdateInfo | null =
+    map.flashlight_apk_version && map.flashlight_apk_url
+      ? {
+          version: map.flashlight_apk_version,
+          url: map.flashlight_apk_url,
+          notes: map.flashlight_apk_notes,
+          forcePromptId: map.flashlight_force_prompt || undefined,
+        }
+      : null;
+
+  const minVersionInfo: MinVersionInfo | null =
+    map.flashlight_min_version && map.flashlight_apk_url
+      ? { minVersion: map.flashlight_min_version, url: map.flashlight_apk_url }
+      : null;
+
+  return { update, minVersionInfo };
+}
+
+function parseVersion(v: string): [number, number, number] {
+  const parts = v.replace(/^v/, "").split(".").map(Number);
+  return [parts[0] ?? 0, parts[1] ?? 0, parts[2] ?? 0];
 }
 
 function isNewer(current: string, remote: string): boolean {
-  const parse = (v: string) => v.replace(/^v/, "").split(".").map(Number);
-  const [cMaj, cMin, cPat] = parse(current);
-  const [rMaj, rMin, rPat] = parse(remote);
+  const [cMaj, cMin, cPat] = parseVersion(current);
+  const [rMaj, rMin, rPat] = parseVersion(remote);
   if (rMaj !== cMaj) return rMaj > cMaj;
   if (rMin !== cMin) return rMin > cMin;
   return rPat > cPat;
 }
 
+function isBelowMin(current: string, min: string): boolean {
+  // Returns true if current < min
+  const [cMaj, cMin, cPat] = parseVersion(current);
+  const [mMaj, mMin, mPat] = parseVersion(min);
+  if (cMaj !== mMaj) return cMaj < mMaj;
+  if (cMin !== mMin) return cMin < mMin;
+  return cPat < mPat;
+}
+
 // ── Full-screen flash overlay ─────────────────────────────────────────────────
-// Uses a Modal with statusBarTranslucent so it truly covers the entire screen
-// including the status bar and the tab bar on Android.
+// The Modal is only mounted while fullscreen strobe is actually running.
+// Keeping it unmounted at startup prevents a crash caused by React Native
+// stacking transparent Modals before the navigation tree is fully initialised.
 
 function FullscreenFlashOverlay() {
-  const { flashAnim } = useFullscreenFlash();
+  const { flashAnim, isFullscreenActive } = useFullscreenFlash();
+  if (!isFullscreenActive) return null;
   return (
     <Modal
       visible
@@ -113,17 +144,44 @@ function FullscreenFlashOverlay() {
         pointerEvents="none"
         style={[
           StyleSheet.absoluteFillObject,
-          {
-            backgroundColor: "#ffffff",
-            opacity: flashAnim,
-          },
+          { backgroundColor: "#ffffff", opacity: flashAnim },
         ]}
       />
     </Modal>
   );
 }
 
-// ── Update dialog ─────────────────────────────────────────────────────────────
+// ── Blocking minimum-version dialog ──────────────────────────────────────────
+// No dismiss button — user must download the update to continue.
+
+function MinVersionDialog({
+  info,
+  onDownload,
+}: {
+  info: MinVersionInfo;
+  onDownload: () => void;
+}) {
+  return (
+    <Modal transparent animationType="fade" statusBarTranslucent>
+      <View style={dlg.backdrop}>
+        <View style={dlg.card}>
+          <Text style={dlg.emoji}>⚠️</Text>
+          <Text style={dlg.title}>Update Required</Text>
+          <Text style={dlg.version}>Version {info.minVersion} or later is required</Text>
+          <Text style={dlg.notes}>
+            This version of the app is no longer supported. Please download the
+            latest update to continue using Flashlight Strobe.
+          </Text>
+          <Pressable style={dlg.primaryBtn} onPress={onDownload}>
+            <Text style={dlg.primaryBtnText}>Download Update</Text>
+          </Pressable>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+// ── Optional update dialog ────────────────────────────────────────────────────
 
 function UpdateDialog({
   info,
@@ -245,6 +303,7 @@ export default function RootLayout() {
   });
 
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
+  const [minVersionInfo, setMinVersionInfo] = useState<MinVersionInfo | null>(null);
   const [showEpilepsyWarning, setShowEpilepsyWarning] = useState(false);
   const checkedRef = useRef(false);
 
@@ -263,19 +322,27 @@ export default function RootLayout() {
     setShowEpilepsyWarning(false);
   };
 
-  // ── Remote update check (runs once after fonts load) ─────────────────────
+  // ── Remote update / min-version check (runs once after fonts load) ────────
   useEffect(() => {
     if ((!fontsLoaded && !fontError) || checkedRef.current) return;
     checkedRef.current = true;
 
     (async () => {
       try {
-        const info = await fetchUpdateInfo();
+        const { update: info, minVersionInfo: minInfo } = await fetchUpdateInfo();
+
+        // ── Blocking min-version gate ────────────────────────────────────
+        // Set flashlight_min_version in Supabase to force all users below
+        // that version to update before they can use the app.
+        if (minInfo && isBelowMin(APP_VERSION, minInfo.minVersion)) {
+          setMinVersionInfo(minInfo);
+          return; // skip optional update check
+        }
+
         if (!info) return;
 
-        // ── Force-prompt path (ignores version comparison) ────────────────
-        // Set flashlight_force_prompt in Supabase to any non-empty unique ID
-        // (e.g. "2024-07-fp1") to show the dialog once regardless of version.
+        // ── Force-prompt (one-time, ignores version comparison) ──────────
+        // Set flashlight_force_prompt to any unique ID in Supabase.
         // Changing the ID resets the "already shown" state.
         if (info.forcePromptId) {
           const dismissedId = await AsyncStorage.getItem(FORCE_PROMPT_DISMISSED_KEY).catch(() => null);
@@ -285,7 +352,7 @@ export default function RootLayout() {
           }
         }
 
-        // ── Normal version-based path ─────────────────────────────────────
+        // ── Normal version-based update prompt ───────────────────────────
         if (!isNewer(APP_VERSION, info.version)) return;
         const dismissed = await AsyncStorage.getItem(DISMISSED_VERSION_KEY).catch(() => null);
         if (dismissed === info.version) return;
@@ -302,21 +369,17 @@ export default function RootLayout() {
 
   if (!fontsLoaded && !fontError) return null;
 
-  const handleDownload = async () => {
-    if (!updateInfo) return;
-    setUpdateInfo(null);
+  const handleDownload = async (url: string) => {
     try {
-      await Linking.openURL(updateInfo.url);
+      await Linking.openURL(url);
     } catch {
-      Alert.alert("Couldn't open link", updateInfo.url);
+      Alert.alert("Couldn't open link", url);
     }
   };
 
-  const handleDismiss = async () => {
+  const handleDismissUpdate = async () => {
     if (updateInfo) {
       if (updateInfo.forcePromptId) {
-        // Mark this specific force-prompt ID as seen — won't show again
-        // unless the ID is changed in Supabase.
         await AsyncStorage.setItem(FORCE_PROMPT_DISMISSED_KEY, updateInfo.forcePromptId).catch(() => {});
       } else {
         await AsyncStorage.setItem(DISMISSED_VERSION_KEY, updateInfo.version).catch(() => {});
@@ -335,16 +398,29 @@ export default function RootLayout() {
                 <GestureHandlerRootView>
                   <KeyboardProvider>
                     <RootLayoutNav />
-                    {/* Epilepsy warning shown on first launch before anything else */}
+
+                    {/* 1. Epilepsy warning — first launch only */}
                     {showEpilepsyWarning && (
                       <EpilepsyWarning onAccept={handleEpilepsyAccept} />
                     )}
-                    {/* Update dialog shown after epilepsy warning is dismissed */}
-                    {!showEpilepsyWarning && updateInfo && (
+
+                    {/* 2. Blocking min-version gate — no dismiss, shown after epilepsy */}
+                    {!showEpilepsyWarning && minVersionInfo && (
+                      <MinVersionDialog
+                        info={minVersionInfo}
+                        onDownload={() => handleDownload(minVersionInfo.url)}
+                      />
+                    )}
+
+                    {/* 3. Optional update prompt */}
+                    {!showEpilepsyWarning && !minVersionInfo && updateInfo && (
                       <UpdateDialog
                         info={updateInfo}
-                        onDownload={handleDownload}
-                        onDismiss={handleDismiss}
+                        onDownload={() => {
+                          setUpdateInfo(null);
+                          handleDownload(updateInfo.url);
+                        }}
+                        onDismiss={handleDismissUpdate}
                       />
                     )}
                   </KeyboardProvider>
@@ -353,8 +429,9 @@ export default function RootLayout() {
             </LanguageProvider>
           </QueryClientProvider>
         </ErrorBoundary>
-        {/* Full-screen flash overlay — rendered in a Modal so it covers the
-            entire screen including the status bar and tab bar on Android. */}
+
+        {/* Full-screen flash overlay — Modal only mounts while actively strobing
+            in fullscreen mode, preventing startup crash from a persistent Modal. */}
         <FullscreenFlashOverlay />
       </FullscreenFlashProvider>
     </SafeAreaProvider>
