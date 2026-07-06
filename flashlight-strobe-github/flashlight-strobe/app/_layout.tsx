@@ -34,7 +34,7 @@ import {
 } from "@/context/FullscreenFlashContext";
 
 // ── App version (keep in sync with app.json) ─────────────────────────────────
-const APP_VERSION = "1.4.0";
+const APP_VERSION = "1.5.0";
 
 // ── Supabase REST API (read-only, no library needed) ─────────────────────────
 const SUPABASE_URL = "https://vdprpaqlerngvcmzwcjg.supabase.co";
