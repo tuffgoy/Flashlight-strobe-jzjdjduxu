@@ -12,7 +12,12 @@
  *                   (rendered at the root layout level via FullscreenFlashContext)
  *
  * Hz slider:
- *  - Drag left/right to set frequency, or tap the +/- buttons / presets
+ *  - Drag left/right to set frequency, or tap +/- buttons / presets
+ *
+ * BPM tap:
+ *  - Tap the TAP button to the beat of music
+ *  - After 2+ taps the average interval is converted to Hz automatically
+ *  - Resets after 3s of inactivity
  *
  * Performance design:
  *  - TorchCamera is an isolated forwardRef component (1×1 off-screen).
@@ -28,7 +33,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useCameraPermissions } from "expo-camera";
 import * as Haptics from "expo-haptics";
 import * as KeepAwake from "expo-keep-awake";
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   Animated,
   PanResponder,
@@ -53,11 +58,14 @@ const MAX_HZ = 120;
 // Timer presets in seconds (0 = no timer)
 const TIMER_PRESETS = [0, 30, 60, 300, 600];
 
+// BPM tap: keep a rolling window of the last N taps for averaging
+const TAP_WINDOW = 8;
+const TAP_RESET_MS = 3000;
+
 function clamp(val: number, lo: number, hi: number) {
   return Math.max(lo, Math.min(hi, val));
 }
 
-// Hz description key index: 0=VerySlowLabel 1=SlowLabel 2=MediumLabel 3=FastLabel 4=RapidLabel 5=UltraLabel
 function hzLabelKey(hz: number): 0 | 1 | 2 | 3 | 4 | 5 {
   if (hz < 2) return 0;
   if (hz < 5) return 1;
@@ -82,24 +90,25 @@ export default function StrobeScreen() {
   const [permission, requestPermission] = useCameraPermissions();
   const [isActive, setIsActive] = useState(false);
   const [hz, setHz] = useState(10);
-  // "torch" = LED only  |  "screen" = display flash only  |  "both" = LED + screen
   const [flashMode, setFlashMode] = useState<"torch" | "screen" | "both">("torch");
   const [timerPresetIdx, setTimerPresetIdx] = useState(0);
   const [countdown, setCountdown] = useState(0);
   const [screenFlashArea, setScreenFlashArea] = useState<"fullscreen" | "safearea">("safearea");
 
+  // BPM tap state
+  const tapTimesRef = useRef<number[]>([]);
+  const tapResetRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [detectedBpm, setDetectedBpm] = useState<number | null>(null);
+  const [tapCount, setTapCount] = useState(0);
+
   const torchRef = useRef<TorchCameraHandle>(null);
   const flashAnim = useRef(new Animated.Value(0)).current;
   const sessionStart = useRef<number | null>(null);
 
-  // logSession ref — updated every render so the strobe cleanup never goes stale
   const logSessionRef = useRef(logSession);
   logSessionRef.current = logSession;
 
-  // Fullscreen flash context — controlled from root layout
   const { flashAnim: fullscreenFlashAnim } = useFullscreenFlash();
-
-  // Track fullscreen mode in a ref so the strobe closure always reads latest value
   const isFullscreenRef = useRef(false);
 
   // ── Hz slider ──────────────────────────────────────────────────────────────
@@ -122,6 +131,48 @@ export default function StrobeScreen() {
     })
   ).current;
 
+  // ── BPM tap ────────────────────────────────────────────────────────────────
+  const handleTapBpm = useCallback(() => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    const now = Date.now();
+
+    const times = [...tapTimesRef.current, now].slice(-TAP_WINDOW);
+    tapTimesRef.current = times;
+    setTapCount(times.length);
+
+    if (times.length >= 2) {
+      // Average the intervals between consecutive taps
+      let totalInterval = 0;
+      for (let i = 1; i < times.length; i++) {
+        totalInterval += times[i] - times[i - 1];
+      }
+      const avgIntervalMs = totalInterval / (times.length - 1);
+      const bpm = Math.round(60000 / avgIntervalMs);
+      // 1 flash per beat: Hz = BPM / 60
+      const newHz = clamp(parseFloat((bpm / 60).toFixed(1)), MIN_HZ, MAX_HZ);
+      setDetectedBpm(bpm);
+      setHz(newHz);
+    }
+
+    // Reset tap state after inactivity
+    if (tapResetRef.current) clearTimeout(tapResetRef.current);
+    tapResetRef.current = setTimeout(() => {
+      tapTimesRef.current = [];
+      setDetectedBpm(null);
+      setTapCount(0);
+    }, TAP_RESET_MS);
+  }, []);
+
+  const handleResetTap = useCallback(() => {
+    if (tapResetRef.current) clearTimeout(tapResetRef.current);
+    tapTimesRef.current = [];
+    setDetectedBpm(null);
+    setTapCount(0);
+  }, []);
+
+  // Cleanup tap timer on unmount
+  useEffect(() => () => { if (tapResetRef.current) clearTimeout(tapResetRef.current); }, []);
+
   // ── Persist flash mode ─────────────────────────────────────────────────────
   useEffect(() => {
     AsyncStorage.getItem("strobe_flash_mode").then((v) => {
@@ -140,7 +191,6 @@ export default function StrobeScreen() {
   }, []);
   useEffect(() => {
     isFullscreenRef.current = screenFlashArea === "fullscreen";
-    // When switching modes, immediately clear both overlays
     flashAnim.setValue(0);
     fullscreenFlashAnim.setValue(0);
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -180,16 +230,6 @@ export default function StrobeScreen() {
   }, [isActive, timerPresetIdx]);
 
   // ── Strobe engine ──────────────────────────────────────────────────────────
-  // setTimeout chain — each toggle schedules exactly one next toggle after
-  // halfPeriod ms. This is far more reliable than setInterval polling because:
-  //   • No missed transitions: every ON→OFF and OFF→ON is its own scheduled event
-  //   • No batching: each setTimeout fires independently; React can't coalesce them
-  //   • No phase drift: the chain self-corrects around JS thread delays
-  //   • Instant start: tick(true) fires synchronously before the first timeout
-  //
-  // Screen flash routing: reads isFullscreenRef at each tick (no closure stale).
-  //   - fullscreen mode → sets fullscreenFlashAnim (root overlay, covers tab bar)
-  //   - safearea mode   → sets local flashAnim (covers content area only)
   useEffect(() => {
     if (!isActive) {
       torchRef.current?.setTorch(false);
@@ -223,7 +263,7 @@ export default function StrobeScreen() {
       timeoutId = setTimeout(() => tick(!on), halfPeriod);
     }
 
-    tick(true); // start immediately — no leading delay
+    tick(true);
 
     return () => {
       alive = false;
@@ -249,8 +289,6 @@ export default function StrobeScreen() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isActive, hz, flashMode, flashAnim, fullscreenFlashAnim]);
 
-  // Fire-and-forget haptics — do NOT await, or the 200-700ms vibration
-  // completion delay becomes visible as lag before the strobe starts.
   const handleToggle = () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
     setIsActive((prev) => !prev);
@@ -260,13 +298,18 @@ export default function StrobeScreen() {
     setHz((prev) => clamp(parseFloat((prev + delta).toFixed(1)), MIN_HZ, MAX_HZ));
 
   const timerPreset = TIMER_PRESETS[timerPresetIdx];
-
   const styles = makeStyles(colors, insets);
   const fillPct = `${((hz - MIN_HZ) / (MAX_HZ - MIN_HZ)) * 100}%` as any;
 
+  // BPM tap label
+  const tapLabel =
+    tapCount === 0 ? "TAP" :
+    tapCount === 1 ? "TAP\n(keep going)" :
+    detectedBpm !== null ? `${detectedBpm}\nBPM` : "TAP";
+
   return (
     <View style={styles.root}>
-      {/* Screen flash overlay — safe-area mode: covers content above tab bar */}
+      {/* Screen flash overlay — safe-area mode */}
       <Animated.View
         pointerEvents="none"
         style={[styles.flashOverlay, { opacity: flashAnim }]}
@@ -306,7 +349,7 @@ export default function StrobeScreen() {
             [t.hzVerySlowLabel, t.hzSlowLabel, t.hzMediumLabel, t.hzFastLabel, t.hzRapidLabel, t.hzUltraLabel][hzLabelKey(hz)]
           }</Text>
 
-          {/* Swipeable slider track — drag left/right to change Hz */}
+          {/* Swipeable slider */}
           <View
             style={styles.sliderTrack}
             onLayout={(e) => { sliderWidth.current = e.nativeEvent.layout.width || 1; }}
@@ -342,6 +385,73 @@ export default function StrobeScreen() {
               </Pressable>
             ))}
           </View>
+        </View>
+
+        {/* ── BPM Tap ────────────────────────────────────────────── */}
+        <View style={styles.card}>
+          <View style={styles.bpmHeader}>
+            <Text style={styles.cardLabel}>BPM TAP</Text>
+            {tapCount > 0 && (
+              <Pressable onPress={handleResetTap}>
+                <Text style={styles.bpmReset}>Reset</Text>
+              </Pressable>
+            )}
+          </View>
+          <Text style={styles.subText}>
+            Tap to the beat — frequency updates automatically
+          </Text>
+
+          <View style={styles.bpmRow}>
+            {/* Big tap button */}
+            <Pressable
+              style={[styles.bpmBtn, tapCount > 0 && styles.bpmBtnActive]}
+              onPress={handleTapBpm}
+            >
+              <Text style={styles.bpmBtnLabel}>
+                {tapCount === 0
+                  ? "TAP"
+                  : tapCount === 1
+                  ? "TAP…"
+                  : detectedBpm !== null
+                  ? `${detectedBpm}`
+                  : "TAP"}
+              </Text>
+              {detectedBpm !== null && (
+                <Text style={styles.bpmBtnSub}>BPM</Text>
+              )}
+              {tapCount === 1 && (
+                <Text style={styles.bpmBtnSub}>keep tapping</Text>
+              )}
+            </Pressable>
+
+            {/* Info column */}
+            <View style={styles.bpmInfo}>
+              <View style={styles.bpmInfoRow}>
+                <Text style={styles.bpmInfoLabel}>TAPS</Text>
+                <Text style={styles.bpmInfoVal}>{tapCount}</Text>
+              </View>
+              <View style={styles.bpmDivider} />
+              <View style={styles.bpmInfoRow}>
+                <Text style={styles.bpmInfoLabel}>SET HZ</Text>
+                <Text style={[styles.bpmInfoVal, { color: colors.primary }]}>
+                  {detectedBpm !== null ? `${(detectedBpm / 60).toFixed(1)}` : "—"}
+                </Text>
+              </View>
+              <View style={styles.bpmDivider} />
+              <View style={styles.bpmInfoRow}>
+                <Text style={styles.bpmInfoLabel}>CURRENT</Text>
+                <Text style={styles.bpmInfoVal}>{hz.toFixed(1)} Hz</Text>
+              </View>
+            </View>
+          </View>
+
+          {tapCount >= 2 && (
+            <Text style={[styles.subText, { textAlign: "center" }]}>
+              {detectedBpm !== null
+                ? `${detectedBpm} BPM → ${(detectedBpm / 60).toFixed(1)} Hz · tap more for accuracy`
+                : "Keep tapping…"}
+            </Text>
+          )}
         </View>
 
         {/* ── Flash mode selector ─────────────────────────────────── */}
@@ -400,7 +510,7 @@ export default function StrobeScreen() {
         <View style={styles.statsRow}>
           {[
             { val: hz.toFixed(1), lbl: "Hz" },
-            { val: `${(1000 / hz).toFixed(0)}`, lbl: "ms / cycle" },
+            { val: `${Math.round(hz * 60)}`, lbl: "BPM" },
             { val: `${(1000 / hz / 2).toFixed(0)}`, lbl: "ms ON" },
             { val: `${(1000 / hz / 2).toFixed(0)}`, lbl: "ms OFF" },
           ].map((item, i, arr) => (
@@ -572,6 +682,79 @@ function makeStyles(
       color: colors.foreground,
     },
     presetTextActive: { color: colors.primaryForeground },
+
+    // BPM tap
+    bpmHeader: {
+      flexDirection: "row",
+      justifyContent: "space-between",
+      alignItems: "center",
+    },
+    bpmReset: {
+      fontSize: 12,
+      fontFamily: "Inter_600SemiBold",
+      color: colors.mutedForeground,
+    },
+    bpmRow: {
+      flexDirection: "row",
+      gap: 14,
+      alignItems: "center",
+    },
+    bpmBtn: {
+      width: 96,
+      height: 96,
+      borderRadius: 48,
+      backgroundColor: colors.muted,
+      borderWidth: 2,
+      borderColor: colors.border,
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 2,
+    },
+    bpmBtnActive: {
+      borderColor: colors.primary,
+      backgroundColor: colors.card,
+    },
+    bpmBtnLabel: {
+      fontSize: 18,
+      fontFamily: "Inter_700Bold",
+      color: colors.foreground,
+      textAlign: "center",
+    },
+    bpmBtnSub: {
+      fontSize: 10,
+      fontFamily: "Inter_500Medium",
+      color: colors.mutedForeground,
+      textAlign: "center",
+    },
+    bpmInfo: {
+      flex: 1,
+      backgroundColor: colors.muted,
+      borderRadius: colors.radius - 2,
+      borderWidth: 1,
+      borderColor: colors.border,
+      overflow: "hidden",
+    },
+    bpmInfoRow: {
+      flexDirection: "row",
+      justifyContent: "space-between",
+      alignItems: "center",
+      paddingHorizontal: 12,
+      paddingVertical: 8,
+    },
+    bpmDivider: { height: 1, backgroundColor: colors.border },
+    bpmInfoLabel: {
+      fontSize: 10,
+      fontFamily: "Inter_700Bold",
+      color: colors.mutedForeground,
+      letterSpacing: 1,
+    },
+    bpmInfoVal: {
+      fontSize: 15,
+      fontFamily: "Inter_700Bold",
+      color: colors.foreground,
+    },
+
+    // Flash mode
     modeRow: { flexDirection: "row", gap: 8 },
     modeBtn: {
       flex: 1,
@@ -595,6 +778,8 @@ function makeStyles(
       letterSpacing: 0.5,
     },
     modeLblActive: { color: colors.primaryForeground },
+
+    // Stats
     statsRow: {
       width: "100%",
       flexDirection: "row",
