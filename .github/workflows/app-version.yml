@@ -1,0 +1,655 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# 🔖  Flashlight Strobe — App Version Tracker & Health Monitor
+#
+# What this workflow does
+# ────────────────────────
+# ON EVERY PUSH to main (touching app code):
+#   • Reads the current version from app.json
+#   • Auto-increments android.versionCode (+1 per push, required by Play Store)
+#   • Runs a suite of feature/config detectors (New Arch, torch compat, etc.)
+#   • Generates APP_INFO.txt at the repo root with a full health snapshot
+#   • Writes a rich Markdown summary to the Actions run page
+#   • Uploads APP_INFO.txt as a downloadable artifact (kept 90 days)
+#   • Commits the updated app.json + APP_INFO.txt back to main [skip ci]
+#
+# ON MANUAL DISPATCH (workflow_dispatch):
+#   • All of the above, PLUS:
+#   • Bumps the semantic version in app.json (patch / minor / major)
+#   • Creates a git tag  (v1.x.y)
+#   • Creates a GitHub Release with optional release notes
+# ──────────────────────────────────────────────────────────────────────────────
+
+name: 🔖 App Version & Health
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'flashlight-strobe-github/flashlight-strobe/app.json'
+      - 'flashlight-strobe-github/flashlight-strobe/package.json'
+      - 'flashlight-strobe-github/flashlight-strobe/**/*.ts'
+      - 'flashlight-strobe-github/flashlight-strobe/**/*.tsx'
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Semantic version bump'
+        required: true
+        default: 'none'
+        type: choice
+        options:
+          - none
+          - patch     # 1.5.0 → 1.5.1
+          - minor     # 1.5.0 → 1.6.0
+          - major     # 1.5.0 → 2.0.0
+      release_notes:
+        description: 'Release notes (shown on the GitHub Release)'
+        required: false
+        default: ''
+
+# Prevent two concurrent runs from racing to commit app.json at the same time.
+concurrency:
+  group: app-version-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version-and-info:
+    name: Version · Detect · Info
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # push commits, tags, and releases
+
+    steps:
+      # ── 1. Checkout (full history needed for git stats) ──────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # ── 2. Read current state from app.json + package.json ───────────────
+      - name: Read app.json
+        id: appjson
+        run: |
+          node - << 'EOF'
+          const fs = require('fs');
+          const path = 'flashlight-strobe-github/flashlight-strobe/app.json';
+          const ex = JSON.parse(fs.readFileSync(path)).expo;
+          const out = [
+            `version=${ex.version}`,
+            `version_code=${ex.android?.versionCode ?? 0}`,
+            `android_package=${ex.android?.package ?? 'n/a'}`,
+            `new_arch_raw=${ex.newArchEnabled ?? true}`,
+            `react_compiler_raw=${ex.experiments?.reactCompiler ?? false}`,
+            `typed_routes_raw=${ex.experiments?.typedRoutes ?? false}`,
+            `app_name=${ex.name}`,
+            `slug=${ex.slug}`,
+          ];
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, out.join('\n') + '\n');
+          console.log('app.json outputs set:\n' + out.join('\n'));
+          EOF
+
+      - name: Read package.json
+        id: pkgjson
+        run: |
+          node - << 'EOF'
+          const fs = require('fs');
+          const p = JSON.parse(fs.readFileSync(
+            'flashlight-strobe-github/flashlight-strobe/package.json'
+          ));
+          const d  = Object.keys(p.dependencies    || {}).length;
+          const dd = Object.keys(p.devDependencies || {}).length;
+          const get = (name, src) => (p[src] || {})[name] ?? 'n/a';
+          const out = [
+            `dep_count=${d}`,
+            `dev_count=${dd}`,
+            `total_deps=${d + dd}`,
+            `expo_ver=${get('expo','devDependencies')}`,
+            `rn_ver=${get('react-native','devDependencies')}`,
+            `react_ver=${get('react','devDependencies')}`,
+            `ts_ver=${get('typescript','devDependencies')}`,
+            `rngh_ver=${get('react-native-gesture-handler','devDependencies')}`,
+            `reanimated_ver=${get('react-native-reanimated','devDependencies')}`,
+            `torch_ver=${get('react-native-torch','dependencies')}`,
+            `async_storage_ver=${get('@react-native-async-storage/async-storage','devDependencies')}`,
+          ];
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, out.join('\n') + '\n');
+          console.log('package.json outputs set:\n' + out.join('\n'));
+          EOF
+
+      # ── 3. Bump version (manual dispatch only) ───────────────────────────
+      - name: Bump version
+        id: bump
+        if: >
+          github.event_name == 'workflow_dispatch' &&
+          github.event.inputs.bump != '' &&
+          github.event.inputs.bump != 'none'
+        env:
+          BUMP_TYPE: ${{ github.event.inputs.bump }}
+        run: |
+          node - << 'EOF'
+          const fs   = require('fs');
+          const path = 'flashlight-strobe-github/flashlight-strobe/app.json';
+          const d    = JSON.parse(fs.readFileSync(path));
+          const [maj, min, pat] = d.expo.version.split('.').map(Number);
+          const bump = process.env.BUMP_TYPE;
+          const prev = d.expo.version;
+
+          if      (bump === 'major') d.expo.version = `${maj+1}.0.0`;
+          else if (bump === 'minor') d.expo.version = `${maj}.${min+1}.0`;
+          else                       d.expo.version = `${maj}.${min}.${pat+1}`;
+
+          if (!d.expo.android) d.expo.android = {};
+          d.expo.android.versionCode = (d.expo.android.versionCode ?? 0) + 1;
+
+          fs.writeFileSync(path, JSON.stringify(d, null, 2) + '\n');
+
+          const out = [
+            `new_version=${d.expo.version}`,
+            `prev_version=${prev}`,
+            `new_version_code=${d.expo.android.versionCode}`,
+          ];
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, out.join('\n') + '\n');
+          console.log(`Bumped (${bump}): ${prev} → ${d.expo.version}  (versionCode ${d.expo.android.versionCode})`);
+          EOF
+
+      # ── 4. Auto-increment versionCode on regular push ────────────────────
+      - name: Auto-increment versionCode
+        if: >
+          github.event_name == 'push' ||
+          github.event.inputs.bump == '' ||
+          github.event.inputs.bump == 'none'
+        run: |
+          node - << 'EOF'
+          const fs   = require('fs');
+          const path = 'flashlight-strobe-github/flashlight-strobe/app.json';
+          const d    = JSON.parse(fs.readFileSync(path));
+          if (!d.expo.android) d.expo.android = {};
+          const prev = d.expo.android.versionCode ?? 0;
+          d.expo.android.versionCode = prev + 1;
+          fs.writeFileSync(path, JSON.stringify(d, null, 2) + '\n');
+          console.log(`versionCode  ${prev} → ${d.expo.android.versionCode}`);
+          EOF
+
+      # ── 5. Re-read version after possible bump ───────────────────────────
+      - name: Resolve final version
+        id: final
+        run: |
+          node - << 'EOF'
+          const fs   = require('fs');
+          const path = 'flashlight-strobe-github/flashlight-strobe/app.json';
+          const ex   = JSON.parse(fs.readFileSync(path)).expo;
+          const out  = [
+            `version=${ex.version}`,
+            `version_code=${ex.android?.versionCode ?? 0}`,
+          ];
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, out.join('\n') + '\n');
+          console.log('Final:', out.join('  '));
+          EOF
+
+      # ── 6. Codebase stats ─────────────────────────────────────────────────
+      - name: Codebase stats
+        id: stats
+        run: |
+          BASE="flashlight-strobe-github/flashlight-strobe"
+
+          TS_FILES=$(find "$BASE" \( -name "*.ts" -o -name "*.tsx" \) \
+            ! -path "*/node_modules/*" | wc -l | xargs)
+
+          TOTAL_LINES=$(find "$BASE" \( -name "*.ts" -o -name "*.tsx" \) \
+            ! -path "*/node_modules/*" | xargs wc -l 2>/dev/null \
+            | tail -1 | awk '{print $1}')
+
+          JSON_FILES=$(find "$BASE" -name "*.json" \
+            ! -path "*/node_modules/*" | wc -l | xargs)
+
+          COMPONENT_COUNT=$(find "$BASE/components" -name "*.tsx" 2>/dev/null \
+            ! -path "*/node_modules/*" | wc -l | xargs)
+
+          SCREEN_COUNT=$(find "$BASE/app" -name "*.tsx" 2>/dev/null \
+            ! -path "*/node_modules/*" | wc -l | xargs)
+
+          CONTEXT_COUNT=$(find "$BASE/context" -name "*.tsx" 2>/dev/null \
+            ! -path "*/node_modules/*" | wc -l | xargs)
+
+          {
+            echo "ts_files=$TS_FILES"
+            echo "total_lines=${TOTAL_LINES:-0}"
+            echo "json_files=$JSON_FILES"
+            echo "component_count=$COMPONENT_COUNT"
+            echo "screen_count=$SCREEN_COUNT"
+            echo "context_count=$CONTEXT_COUNT"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "TS files=$TS_FILES  lines=${TOTAL_LINES:-0}  components=$COMPONENT_COUNT  screens=$SCREEN_COUNT"
+
+      # ── 7. Git stats ──────────────────────────────────────────────────────
+      - name: Git stats
+        id: git
+        run: |
+          SHA=$(git rev-parse HEAD)
+          SHA_SHORT=$(git rev-parse --short HEAD)
+          AUTHOR=$(git log -1 --format='%an')
+          AUTHOR_EMAIL=$(git log -1 --format='%ae')
+          # Sanitize commit message — strip characters that break GITHUB_OUTPUT
+          COMMIT_MSG=$(git log -1 --format='%s' | tr -d '\n\r' | sed "s/'//g")
+          COMMIT_DATE=$(git log -1 --format='%ci')
+          TOTAL_COMMITS=$(git rev-list --count HEAD)
+          BRANCH=$(git rev-parse --abbrev-ref HEAD)
+          FIRST_COMMIT=$(git log --reverse --format='%ci' | head -1)
+          CONTRIBUTORS=$(git log --format='%ae' | sort -u | wc -l | xargs)
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo 'none')
+          if [ "$LAST_TAG" != "none" ]; then
+            COMMITS_SINCE=$(git log "${LAST_TAG}..HEAD" --oneline 2>/dev/null | wc -l | xargs)
+          else
+            COMMITS_SINCE="$TOTAL_COMMITS"
+          fi
+
+          # Changed files in the triggering push
+          CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD 2>/dev/null | wc -l | xargs || echo '1')
+
+          {
+            echo "sha=$SHA"
+            echo "sha_short=$SHA_SHORT"
+            echo "author=$AUTHOR"
+            echo "author_email=$AUTHOR_EMAIL"
+            echo "message=$COMMIT_MSG"
+            echo "date=$COMMIT_DATE"
+            echo "total_commits=$TOTAL_COMMITS"
+            echo "branch=$BRANCH"
+            echo "first_commit=$FIRST_COMMIT"
+            echo "contributors=$CONTRIBUTORS"
+            echo "last_tag=$LAST_TAG"
+            echo "commits_since_tag=$COMMITS_SINCE"
+            echo "changed_files=$CHANGED_FILES"
+          } >> "$GITHUB_OUTPUT"
+
+      # ── 8. Feature & config detectors ────────────────────────────────────
+      - name: Feature detectors
+        id: detect
+        env:
+          NEW_ARCH_RAW:       ${{ steps.appjson.outputs.new_arch_raw }}
+          RC_RAW:             ${{ steps.appjson.outputs.react_compiler_raw }}
+          TR_RAW:             ${{ steps.appjson.outputs.typed_routes_raw }}
+          TORCH_VER:          ${{ steps.pkgjson.outputs.torch_ver }}
+          VERSION_CODE:       ${{ steps.final.outputs.version_code }}
+        run: |
+          # ── New Architecture ───────────────────────────────────────────────
+          if [ "$NEW_ARCH_RAW" = "false" ]; then
+            NEW_ARCH="⚠  DISABLED  (intentional — react-native-torch@1.2.0 compat)"
+          else
+            NEW_ARCH="✓  ENABLED"
+          fi
+
+          # ── React Compiler ─────────────────────────────────────────────────
+          if [ "$RC_RAW" = "true" ]; then
+            REACT_COMPILER="✓  ENABLED"
+          else
+            REACT_COMPILER="—  DISABLED"
+          fi
+
+          # ── Typed Routes ───────────────────────────────────────────────────
+          if [ "$TR_RAW" = "true" ]; then
+            TYPED_ROUTES="✓  ENABLED"
+          else
+            TYPED_ROUTES="—  DISABLED"
+          fi
+
+          # ── Torch / New Arch conflict detector ────────────────────────────
+          if [ "$TORCH_VER" = "n/a" ] || [ -z "$TORCH_VER" ]; then
+            TORCH_STATUS="—  not installed"
+          elif [ "$NEW_ARCH_RAW" = "true" ]; then
+            TORCH_STATUS="✗  CONFLICT — react-native-torch requires newArchEnabled:false"
+          else
+            TORCH_STATUS="✓  $TORCH_VER  (compatible — newArchEnabled:false)"
+          fi
+
+          # ── versionCode presence ───────────────────────────────────────────
+          if [ "$VERSION_CODE" = "0" ] || [ -z "$VERSION_CODE" ]; then
+            VC_STATUS="✗  MISSING — required for Play Store uploads"
+          else
+            VC_STATUS="✓  SET ($VERSION_CODE)"
+          fi
+
+          # ── EAS appVersionSource ───────────────────────────────────────────
+          EAS_SRC=$(node -pe \
+            "require('./flashlight-strobe-github/flashlight-strobe/eas.json').cli?.appVersionSource ?? 'remote'")
+          if [ "$EAS_SRC" = "local" ]; then
+            EAS_STATUS="✓  local  (reads version from app.json)"
+          else
+            EAS_STATUS="ℹ  $EAS_SRC"
+          fi
+
+          # ── Proguard / resource shrinking ──────────────────────────────────
+          PG=$(node -pe \
+            "require('./flashlight-strobe-github/flashlight-strobe/app.json').expo.android?.enableProguardInReleaseBuilds ?? false")
+          SR=$(node -pe \
+            "require('./flashlight-strobe-github/flashlight-strobe/app.json').expo.android?.enableShrinkResourcesInReleaseBuilds ?? false")
+          if [ "$PG" = "true" ] && [ "$SR" = "true" ]; then
+            BUILD_OPT="✓  Proguard + resource shrinking ENABLED"
+          elif [ "$PG" = "true" ]; then
+            BUILD_OPT="~  Proguard ENABLED, resource shrinking DISABLED"
+          else
+            BUILD_OPT="✗  Proguard DISABLED (release APKs are larger)"
+          fi
+
+          {
+            echo "new_arch=$NEW_ARCH"
+            echo "react_compiler=$REACT_COMPILER"
+            echo "typed_routes=$TYPED_ROUTES"
+            echo "torch=$TORCH_STATUS"
+            echo "version_code=$VC_STATUS"
+            echo "eas_source=$EAS_STATUS"
+            echo "build_opt=$BUILD_OPT"
+          } >> "$GITHUB_OUTPUT"
+
+      # ── 9. Generate APP_INFO.txt ──────────────────────────────────────────
+      - name: Generate APP_INFO.txt
+        env:
+          # Version
+          APP_VERSION:        ${{ steps.final.outputs.version }}
+          VERSION_CODE:       ${{ steps.final.outputs.version_code }}
+          BUMP_TYPE:          ${{ github.event.inputs.bump || 'auto (push)' }}
+          # Git
+          BRANCH:             ${{ steps.git.outputs.branch }}
+          SHA_SHORT:          ${{ steps.git.outputs.sha_short }}
+          SHA:                ${{ steps.git.outputs.sha }}
+          AUTHOR:             ${{ steps.git.outputs.author }}
+          AUTHOR_EMAIL:       ${{ steps.git.outputs.author_email }}
+          COMMIT_MSG:         ${{ steps.git.outputs.message }}
+          COMMIT_DATE:        ${{ steps.git.outputs.date }}
+          TOTAL_COMMITS:      ${{ steps.git.outputs.total_commits }}
+          CONTRIBUTORS:       ${{ steps.git.outputs.contributors }}
+          LAST_TAG:           ${{ steps.git.outputs.last_tag }}
+          COMMITS_SINCE_TAG:  ${{ steps.git.outputs.commits_since_tag }}
+          FIRST_COMMIT:       ${{ steps.git.outputs.first_commit }}
+          CHANGED_FILES:      ${{ steps.git.outputs.changed_files }}
+          # Codebase
+          TS_FILES:           ${{ steps.stats.outputs.ts_files }}
+          TOTAL_LINES:        ${{ steps.stats.outputs.total_lines }}
+          JSON_FILES:         ${{ steps.stats.outputs.json_files }}
+          COMPONENT_COUNT:    ${{ steps.stats.outputs.component_count }}
+          SCREEN_COUNT:       ${{ steps.stats.outputs.screen_count }}
+          CONTEXT_COUNT:      ${{ steps.stats.outputs.context_count }}
+          # Runtime
+          EXPO_VER:           ${{ steps.pkgjson.outputs.expo_ver }}
+          RN_VER:             ${{ steps.pkgjson.outputs.rn_ver }}
+          REACT_VER:          ${{ steps.pkgjson.outputs.react_ver }}
+          TS_VER:             ${{ steps.pkgjson.outputs.ts_ver }}
+          RNGH_VER:           ${{ steps.pkgjson.outputs.rngh_ver }}
+          REANIMATED_VER:     ${{ steps.pkgjson.outputs.reanimated_ver }}
+          TORCH_VER:          ${{ steps.pkgjson.outputs.torch_ver }}
+          ASYNC_STORAGE_VER:  ${{ steps.pkgjson.outputs.async_storage_ver }}
+          # Deps
+          DEP_COUNT:          ${{ steps.pkgjson.outputs.dep_count }}
+          DEV_COUNT:          ${{ steps.pkgjson.outputs.dev_count }}
+          TOTAL_DEPS:         ${{ steps.pkgjson.outputs.total_deps }}
+          # Detectors
+          DETECT_NEW_ARCH:    ${{ steps.detect.outputs.new_arch }}
+          DETECT_RC:          ${{ steps.detect.outputs.react_compiler }}
+          DETECT_TR:          ${{ steps.detect.outputs.typed_routes }}
+          DETECT_TORCH:       ${{ steps.detect.outputs.torch }}
+          DETECT_VC:          ${{ steps.detect.outputs.version_code }}
+          DETECT_EAS:         ${{ steps.detect.outputs.eas_source }}
+          DETECT_BUILD_OPT:   ${{ steps.detect.outputs.build_opt }}
+          # Meta
+          TRIGGER:            ${{ github.event_name }}
+          ACTOR:              ${{ github.actor }}
+          RUN_NUMBER:         ${{ github.run_number }}
+          RUN_ID:             ${{ github.run_id }}
+          REPO:               ${{ github.repository }}
+        run: |
+          NOW=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
+          RUN_URL="https://github.com/${REPO}/actions/runs/${RUN_ID}"
+
+          {
+          printf '╔══════════════════════════════════════════════════════════════════╗\n'
+          printf '║          FLASHLIGHT STROBE  ·  APP INFO & HEALTH               ║\n'
+          printf '╚══════════════════════════════════════════════════════════════════╝\n'
+          printf '\n'
+          printf '  Generated   : %s\n'      "$NOW"
+          printf '  Trigger     : %s  (by %s)  ·  Run #%s\n' "$TRIGGER" "$ACTOR" "$RUN_NUMBER"
+          printf '  Run URL     : %s\n'      "$RUN_URL"
+          printf '\n'
+          printf '─── VERSION ───────────────────────────────────────────────────────\n'
+          printf '  App Version : %s\n'      "$APP_VERSION"
+          printf '  versionCode : %s         (Android Play Store build number)\n' "$VERSION_CODE"
+          printf '  Bump Type   : %s\n'      "$BUMP_TYPE"
+          printf '  EAS Source  : %s\n'      "$DETECT_EAS"
+          printf '\n'
+          printf '─── GIT ───────────────────────────────────────────────────────────\n'
+          printf '  Branch         : %s\n'   "$BRANCH"
+          printf '  Commit         : %s  (%s)\n' "$SHA_SHORT" "$SHA"
+          printf '  Author         : %s <%s>\n' "$AUTHOR" "$AUTHOR_EMAIL"
+          printf '  Message        : %s\n'   "$COMMIT_MSG"
+          printf '  Committed      : %s\n'   "$COMMIT_DATE"
+          printf '  Changed files  : %s\n'   "$CHANGED_FILES"
+          printf '  Total commits  : %s\n'   "$TOTAL_COMMITS"
+          printf '  Contributors   : %s unique author(s)\n' "$CONTRIBUTORS"
+          printf '  Last tag       : %s\n'   "$LAST_TAG"
+          printf '  Commits since tag: %s\n' "$COMMITS_SINCE_TAG"
+          printf '  Repo since     : %s\n'   "$FIRST_COMMIT"
+          printf '\n'
+          printf '─── CODEBASE ──────────────────────────────────────────────────────\n'
+          printf '  TypeScript / TSX files : %s\n'  "$TS_FILES"
+          printf '  Total lines of TS/TSX  : %s\n'  "$TOTAL_LINES"
+          printf '  JSON config files      : %s\n'  "$JSON_FILES"
+          printf '  Screens (app/*.tsx)    : %s\n'  "$SCREEN_COUNT"
+          printf '  Components             : %s\n'  "$COMPONENT_COUNT"
+          printf '  Context providers      : %s\n'  "$CONTEXT_COUNT"
+          printf '\n'
+          printf '─── RUNTIME ───────────────────────────────────────────────────────\n'
+          printf '  Expo SDK              : %s\n'   "$EXPO_VER"
+          printf '  React Native          : %s\n'   "$RN_VER"
+          printf '  React                 : %s\n'   "$REACT_VER"
+          printf '  TypeScript            : %s\n'   "$TS_VER"
+          printf '  RN Gesture Handler    : %s\n'   "$RNGH_VER"
+          printf '  RN Reanimated         : %s\n'   "$REANIMATED_VER"
+          printf '  react-native-torch    : %s\n'   "$TORCH_VER"
+          printf '  AsyncStorage          : %s\n'   "$ASYNC_STORAGE_VER"
+          printf '\n'
+          printf '─── DEPENDENCIES ──────────────────────────────────────────────────\n'
+          printf '  Production deps : %s\n'  "$DEP_COUNT"
+          printf '  Dev deps        : %s\n'  "$DEV_COUNT"
+          printf '  Total           : %s\n'  "$TOTAL_DEPS"
+          printf '\n'
+          printf '─── FEATURE DETECTORS ─────────────────────────────────────────────\n'
+          printf '  New Architecture    : %s\n'  "$DETECT_NEW_ARCH"
+          printf '  React Compiler      : %s\n'  "$DETECT_RC"
+          printf '  Typed Routes        : %s\n'  "$DETECT_TR"
+          printf '  Android versionCode : %s\n'  "$DETECT_VC"
+          printf '  Torch compatibility : %s\n'  "$DETECT_TORCH"
+          printf '  Release build opt.  : %s\n'  "$DETECT_BUILD_OPT"
+          printf '\n'
+          printf '─── BUILD PROFILES (eas.json) ─────────────────────────────────────\n'
+          printf '  development  →  APK debug    internal distribution  (assembleDebug)\n'
+          printf '  preview      →  APK release  internal distribution  (assembleRelease)\n'
+          printf '  production   →  APK + IPA    store submission\n'
+          printf '\n'
+          printf '─── PLATFORM SUPPORT ──────────────────────────────────────────────\n'
+          printf '  Android  :  ✓  (com.flashlightstrobe.app)\n'
+          printf '  iOS      :  ✓  (tablet: false)\n'
+          printf '  Web      :  ✓\n'
+          printf '\n'
+          printf '────────────────────────────────────────────────────────────────────\n'
+          printf '  Auto-generated by GitHub Actions — do not edit manually.\n'
+          printf '  Workflow : .github/workflows/app-version.yml\n'
+          } > APP_INFO.txt
+
+          echo "::notice title=APP_INFO.txt::Generated for v${APP_VERSION} (versionCode ${VERSION_CODE})"
+          echo "--- APP_INFO.txt ---"
+          cat APP_INFO.txt
+
+      # ── 10. Commit app.json + APP_INFO.txt ───────────────────────────────
+      - name: Commit & push
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add APP_INFO.txt flashlight-strobe-github/flashlight-strobe/app.json
+
+          if git diff --cached --quiet; then
+            echo "Nothing to commit."
+          else
+            BUMP="${{ github.event.inputs.bump }}"
+            if [ -n "$BUMP" ] && [ "$BUMP" != "none" ]; then
+              MSG="chore(version): bump to ${{ steps.bump.outputs.new_version }} ($BUMP) [skip ci]"
+            else
+              MSG="chore: update APP_INFO + versionCode [skip ci]"
+            fi
+            git commit -m "$MSG"
+            git push
+            echo "Pushed: $MSG"
+          fi
+
+      # ── 11. Tag + GitHub Release (version bump only) ─────────────────────
+      - name: Create git tag
+        if: >
+          github.event_name == 'workflow_dispatch' &&
+          github.event.inputs.bump != '' &&
+          github.event.inputs.bump != 'none'
+        run: |
+          NEW_VER="${{ steps.bump.outputs.new_version }}"
+          if git tag -l "v${NEW_VER}" | grep -q "v${NEW_VER}"; then
+            echo "Tag v${NEW_VER} already exists — skipping."
+          else
+            git tag "v${NEW_VER}" -m "Release v${NEW_VER}"
+            git push origin "v${NEW_VER}"
+            echo "Created and pushed tag v${NEW_VER}"
+          fi
+
+      - name: Create GitHub Release
+        if: >
+          github.event_name == 'workflow_dispatch' &&
+          github.event.inputs.bump != '' &&
+          github.event.inputs.bump != 'none'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const version = '${{ steps.bump.outputs.new_version }}';
+            const prevVer = '${{ steps.bump.outputs.prev_version }}';
+            const bump    = '${{ github.event.inputs.bump }}';
+            const notes   = `${{ github.event.inputs.release_notes }}`;
+
+            const body = notes
+              ? notes
+              : [
+                  `## 🔦 Flashlight Strobe v${version}`,
+                  '',
+                  `**Version bump:** \`${bump}\`  (\`${prevVer}\` → \`${version}\`)`,
+                  `**versionCode:** ${{ steps.final.outputs.version_code }}`,
+                  '',
+                  '### Detectors',
+                  `- New Architecture: ${{ steps.detect.outputs.new_arch }}`,
+                  `- Torch compat: ${{ steps.detect.outputs.torch }}`,
+                  `- Build optimisation: ${{ steps.detect.outputs.build_opt }}`,
+                  '',
+                  `See [APP_INFO.txt](https://github.com/${{ github.repository }}/blob/main/APP_INFO.txt) for the full health snapshot.`,
+                ].join('\n');
+
+            try {
+              const rel = await github.rest.repos.createRelease({
+                owner:      context.repo.owner,
+                repo:       context.repo.repo,
+                tag_name:   `v${version}`,
+                name:       `🔦 Flashlight Strobe v${version}`,
+                body,
+                draft:      false,
+                prerelease: bump === 'patch',   // patch bumps are pre-release by default
+              });
+              core.notice(`GitHub Release created: ${rel.data.html_url}`);
+              console.log('Release URL:', rel.data.html_url);
+            } catch (e) {
+              if (e.status === 422) {
+                core.warning(`Release v${version} already exists — skipping.`);
+              } else {
+                throw e;
+              }
+            }
+
+      # ── 12. Upload APP_INFO.txt as a downloadable artifact ───────────────
+      - name: Upload APP_INFO artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-info-v${{ steps.final.outputs.version }}-run${{ github.run_number }}
+          path: APP_INFO.txt
+          retention-days: 90
+
+      # ── 13. Write a Markdown summary to the Actions run page ─────────────
+      - name: Job summary
+        env:
+          APP_VERSION:  ${{ steps.final.outputs.version }}
+          VERSION_CODE: ${{ steps.final.outputs.version_code }}
+        run: |
+          PREV_VER="${{ steps.bump.outputs.prev_version }}"
+          NEW_VER="${{ steps.bump.outputs.new_version }}"
+          BUMP="${{ github.event.inputs.bump }}"
+
+          {
+          echo "## 🔦 Flashlight Strobe — Version & Health"
+          echo ""
+
+          if [ -n "$BUMP" ] && [ "$BUMP" != "none" ]; then
+            echo "> **Version bumped:** \`$PREV_VER\` → \`$NEW_VER\` ($BUMP)"
+            echo ""
+          fi
+
+          echo "### 📦 Version"
+          echo "| Field | Value |"
+          echo "|-------|-------|"
+          echo "| App Version | \`$APP_VERSION\` |"
+          echo "| versionCode (Android) | \`$VERSION_CODE\` |"
+          echo "| Bump type | ${{ github.event.inputs.bump || 'auto (push)' }} |"
+          echo "| EAS source | ${{ steps.detect.outputs.eas_source }} |"
+          echo ""
+
+          echo "### 🔀 Git"
+          echo "| Field | Value |"
+          echo "|-------|-------|"
+          echo "| Branch | \`${{ steps.git.outputs.branch }}\` |"
+          echo "| Commit | \`${{ steps.git.outputs.sha_short }}\` |"
+          echo "| Author | ${{ steps.git.outputs.author }} |"
+          echo "| Message | ${{ steps.git.outputs.message }} |"
+          echo "| Total commits | ${{ steps.git.outputs.total_commits }} |"
+          echo "| Changed files | ${{ steps.git.outputs.changed_files }} |"
+          echo "| Last tag | ${{ steps.git.outputs.last_tag }} |"
+          echo "| Commits since tag | ${{ steps.git.outputs.commits_since_tag }} |"
+          echo ""
+
+          echo "### 🏗️ Codebase"
+          echo "| Metric | Count |"
+          echo "|--------|-------|"
+          echo "| TS/TSX files | ${{ steps.stats.outputs.ts_files }} |"
+          echo "| Lines of code | ${{ steps.stats.outputs.total_lines }} |"
+          echo "| Screens | ${{ steps.stats.outputs.screen_count }} |"
+          echo "| Components | ${{ steps.stats.outputs.component_count }} |"
+          echo "| Context providers | ${{ steps.stats.outputs.context_count }} |"
+          echo ""
+
+          echo "### ⚙️ Feature Detectors"
+          echo "| Detector | Status |"
+          echo "|----------|--------|"
+          echo "| New Architecture | ${{ steps.detect.outputs.new_arch }} |"
+          echo "| React Compiler | ${{ steps.detect.outputs.react_compiler }} |"
+          echo "| Typed Routes | ${{ steps.detect.outputs.typed_routes }} |"
+          echo "| Android versionCode | ${{ steps.detect.outputs.version_code }} |"
+          echo "| Torch compatibility | ${{ steps.detect.outputs.torch }} |"
+          echo "| Release build opt. | ${{ steps.detect.outputs.build_opt }} |"
+          echo ""
+
+          echo "### 📚 Key Dependencies"
+          echo "| Package | Version |"
+          echo "|---------|---------|"
+          echo "| Expo SDK | ${{ steps.pkgjson.outputs.expo_ver }} |"
+          echo "| React Native | ${{ steps.pkgjson.outputs.rn_ver }} |"
+          echo "| TypeScript | ${{ steps.pkgjson.outputs.ts_ver }} |"
+          echo "| react-native-torch | ${{ steps.pkgjson.outputs.torch_ver }} |"
+          echo ""
+
+          echo "---"
+          echo "[View APP_INFO.txt](https://github.com/${{ github.repository }}/blob/main/APP_INFO.txt)"
+
+          } >> "$GITHUB_STEP_SUMMARY"
