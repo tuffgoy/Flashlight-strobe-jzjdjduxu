@@ -129,6 +129,18 @@ export default function StrobeScreen() {
   const logSessionRef = useRef(logSession);
   logSessionRef.current = logSession;
 
+  // ── Strobe engine state refs (setInterval-based, copied from strobe-light.apk) ──
+  // intervalRef holds the active setInterval ID — cleared on stop.
+  // flashOnRef tracks current flash state (true = ON) — the 'm' variable in the APK.
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const flashOnRef  = useRef(false);
+
+  // tickFnRef — the interval callback always calls through this ref so it
+  // reads the LATEST flashModeRef / isFullscreenRef / torchRef on every tick
+  // without needing to restart the interval when mode or screen-area changes.
+  // Equivalent to Y() → te()/_e() in strobe-light.apk.
+  const tickFnRef = useRef<() => void>(() => {});
+
   const {
     flashAnim: fullscreenFlashAnim,
     setFullscreenActive,
@@ -295,16 +307,55 @@ export default function StrobeScreen() {
     return () => clearInterval(id);
   }, [isActive, timerPresetIdx]);
 
-  // ── Strobe engine (drift-correcting, ref-based) ───────────────────────────
+  // ── Strobe engine — setInterval, copied from strobe-light.apk ─────────────
   //
-  // Hz and flashMode are read from refs inside tick() so that:
-  //   a) The user can drag the Hz slider without stopping/restarting the strobe.
-  //   b) Switching flash mode takes effect on the next half-period boundary.
+  // Reference implementation (strobe-light.apk / script.bundle.js):
+  //   w  = 1000 / (2 * hz)          // half-period in ms
+  //   h  = setInterval(Y, w)         // strobe clock
+  //   Y() { m ? _e() : te() }        // tick: toggle based on current state
+  //   _e() { setFlash(false); m=false }   // flash OFF
+  //   te() { setFlash(true);  m=true  }   // flash ON
   //
-  // The epoch is recalibrated whenever Hz changes by > 1% so that the
-  // tickCount * halfPeriod accounting doesn't drift wildly when jumping Hz.
+  // tickFnRef is updated every render so it always reads the latest refs
+  // without restarting the interval.  Mode / area changes take effect on the
+  // very next tick — same behaviour as the reference app.
+  tickFnRef.current = () => {
+    const mode      = flashModeRef.current;
+    const useTorch  = mode !== "screen";
+    const useScreen = mode !== "torch";
+
+    // Toggle flash state — equivalent to 'm = !m' in the reference
+    flashOnRef.current = !flashOnRef.current;
+    const on = flashOnRef.current;
+
+    // ── Torch (LED) ───────────────────────────────────────────────────────
+    if (useTorch) torchRef.current?.setTorch(on);
+
+    // ── Screen flash ──────────────────────────────────────────────────────
+    if (useScreen) {
+      const fullscreen = isFullscreenRef.current;
+      // Keep fullscreen overlay in sync with current mode/area
+      setFullscreenActiveRef.current(fullscreen);
+      if (fullscreen) {
+        fullscreenFlashAnim.setValue(on ? 1 : 0);
+        flashAnim.setValue(0);
+      } else {
+        flashAnim.setValue(on ? 1 : 0);
+        fullscreenFlashAnim.setValue(0);
+      }
+    } else {
+      // Torch-only: make sure screen overlays are cleared
+      flashAnim.setValue(0);
+      fullscreenFlashAnim.setValue(0);
+    }
+  };
+
+  // Start / stop the strobe when isActive changes
   useEffect(() => {
     if (!isActive) {
+      // ── Stop ──────────────────────────────────────────────────────────
+      if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null; }
+      flashOnRef.current = false;
       torchRef.current?.setTorch(false);
       flashAnim.setValue(0);
       fullscreenFlashAnim.setValue(0);
@@ -312,76 +363,26 @@ export default function StrobeScreen() {
       return;
     }
 
+    // ── Start ────────────────────────────────────────────────────────────
     sessionStart.current = Date.now();
 
-    // Activate the fullscreen modal now if needed (it only shows when active).
-    const initialUseScreen = flashModeRef.current !== "torch" || Platform.OS === "web";
-    if (isFullscreenRef.current && initialUseScreen) {
-      setFullscreenActiveRef.current(true);
-    }
+    // Activate fullscreen overlay immediately if needed
+    const useScreen = flashModeRef.current !== "torch";
+    if (isFullscreenRef.current && useScreen) setFullscreenActiveRef.current(true);
 
-    let alive = true;
-    let timeoutId: ReturnType<typeof setTimeout>;
-    let epoch = Date.now();
-    let tickCount = 0;
-    let prevHz = hzRef.current;
-
-    function tick() {
-      if (!alive) return;
-
-      const currentHz = hzRef.current;
-      const currentMode = flashModeRef.current;
-      const useTorch = currentMode !== "screen";
-      const useScreen = currentMode !== "torch" || Platform.OS === "web";
-
-      // If Hz changed by more than 1%, reset the epoch so the scheduler
-      // doesn't try to "catch up" a large backlog of missed half-periods.
-      if (Math.abs(currentHz - prevHz) / prevHz > 0.01) {
-        epoch = Date.now();
-        tickCount = 0;
-        prevHz = currentHz;
-      }
-
-      // Manage fullscreen modal: keep it in sync if the user changed the
-      // flash mode or screen-area setting while the strobe was running.
-      const wantFullscreen = isFullscreenRef.current && useScreen;
-      setFullscreenActiveRef.current(wantFullscreen);
-
-      const halfPeriod = (1000 / currentHz) / 2;
-      const on = tickCount % 2 === 0;
-
-      if (useTorch) torchRef.current?.setTorch(on);
-      if (useScreen) {
-        const val = on ? 1 : 0;
-        if (isFullscreenRef.current) {
-          fullscreenFlashAnim.setValue(val);
-          flashAnim.setValue(0);
-        } else {
-          flashAnim.setValue(val);
-          fullscreenFlashAnim.setValue(0);
-        }
-      } else {
-        // Torch-only mode — clear screen flash if it was on before.
-        flashAnim.setValue(0);
-        fullscreenFlashAnim.setValue(0);
-      }
-
-      tickCount++;
-      // Schedule next tick with drift correction; minimum 1 ms to avoid
-      // setTimeout(fn, 0) busy-looping at the JS engine limit.
-      const delay = Math.max(1, epoch + tickCount * halfPeriod - Date.now());
-      timeoutId = setTimeout(tick, delay);
-    }
-
-    tick();
+    // h = setInterval(Y, w)  — core line from the reference app
+    flashOnRef.current = false;
+    const halfPeriod = Math.max(1, Math.round(1000 / (2 * hzRef.current)));
+    intervalRef.current = setInterval(() => tickFnRef.current(), halfPeriod);
 
     return () => {
-      alive = false;
-      clearTimeout(timeoutId);
+      if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null; }
+      flashOnRef.current = false;
       torchRef.current?.setTorch(false);
       flashAnim.setValue(0);
       fullscreenFlashAnim.setValue(0);
       setFullscreenActiveRef.current(false);
+      // Log session
       if (sessionStart.current !== null) {
         const durationMs = Date.now() - sessionStart.current;
         if (durationMs > 2000) {
@@ -397,10 +398,23 @@ export default function StrobeScreen() {
         sessionStart.current = null;
       }
     };
-  // hz and flashMode are intentionally excluded — they're read via refs so
-  // the engine runs continuously without restarting on every slider drag.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isActive, flashAnim, fullscreenFlashAnim]);
+
+  // Hz change while active: restart interval with new period.
+  // Faithful translation of j() in strobe-light.apk:
+  //   if active → stop → w = 1000/(2*hz) → restart
+  useEffect(() => {
+    if (!isActive) return;
+    if (intervalRef.current) clearInterval(intervalRef.current);
+    flashOnRef.current = false;
+    torchRef.current?.setTorch(false);
+    flashAnim.setValue(0);
+    fullscreenFlashAnim.setValue(0);
+    const halfPeriod = Math.max(1, Math.round(1000 / (2 * hz)));
+    intervalRef.current = setInterval(() => tickFnRef.current(), halfPeriod);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hz]);
 
   const handleToggle = () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
