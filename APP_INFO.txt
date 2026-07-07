@@ -2,32 +2,32 @@
 ║          FLASHLIGHT STROBE  ·  APP INFO & HEALTH               ║
 ╚══════════════════════════════════════════════════════════════════╝
 
-  Generated   : 2026-07-07 08:30:23 UTC
-  Trigger     : push  (by tuffgoy)  ·  Run #3
-  Run URL     : https://github.com/tuffgoy/Flashlight-strobe-jzjdjduxu/actions/runs/28852601929
+  Generated   : 2026-07-07 09:16:46 UTC
+  Trigger     : push  (by tuffgoy)  ·  Run #4
+  Run URL     : https://github.com/tuffgoy/Flashlight-strobe-jzjdjduxu/actions/runs/28855288700
 
 ─── VERSION ───────────────────────────────────────────────────────
   App Version : 1.5.0
-  versionCode : 3         (Android Play Store build number)
+  versionCode : 4         (Android Play Store build number)
   Bump Type   : auto (push)
   EAS Source  : ✓  local  (reads version from app.json)
 
 ─── GIT ───────────────────────────────────────────────────────────
   Branch         : main
-  Commit         : 3de75d7  (3de75d7697484447d2c69e14e5ed1d60dd90800f)
+  Commit         : 5c53168  (5c53168e72b6746b7810562cebcd446bf9371954)
   Author         : Replit Agent <agent@replit.com>
-  Message        : fix(flash): screen overlay on top of UI; fullscreen touch-passthrough
-  Committed      : 2026-07-07 08:30:09 +0000
-  Changed files  : 2
-  Total commits  : 156
+  Message        : fix(strobe): copy setInterval engine from strobe-light.apk
+  Committed      : 2026-07-07 09:16:35 +0000
+  Changed files  : 1
+  Total commits  : 158
   Contributors   : 6 unique author(s)
   Last tag       : none
-  Commits since tag: 156
+  Commits since tag: 158
   Repo since     : 2026-06-30 23:38:14 +0200
 
 ─── CODEBASE ──────────────────────────────────────────────────────
   TypeScript / TSX files : 21
-  Total lines of TS/TSX  : 5258
+  Total lines of TS/TSX  : 5272
   JSON config files      : 4
   Screens (app/*.tsx)    : 10
   Components             : 4
@@ -52,7 +52,7 @@
   New Architecture    : ✓  ENABLED
   React Compiler      : —  DISABLED
   Typed Routes        : ✓  ENABLED
-  Android versionCode : ✓  SET (3)
+  Android versionCode : ✓  SET (4)
   Torch compatibility : —  not installed
   Release build opt.  : ✓  Proguard + resource shrinking ENABLED
 
