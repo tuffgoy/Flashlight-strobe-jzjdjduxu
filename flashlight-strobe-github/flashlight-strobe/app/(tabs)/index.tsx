@@ -677,6 +677,26 @@ export default function StrobeScreen() {
           </Pressable>
         )}
       </ScrollView>
+
+      {/*
+       * Safe-area screen flash overlay — rendered AFTER ScrollView so it
+       * appears on top of all cards, buttons, and the slider.
+       * pointerEvents="none" on both views means every touch (scroll, button
+       * tap, slider drag) passes through to the ScrollView beneath.
+       * Only the on/off button stops the strobe — nothing else.
+       * Fullscreen coverage is handled by FullscreenFlashOverlay in _layout.tsx.
+       */}
+      {flashMode !== "torch" && screenFlashArea === "safearea" && (
+        <View pointerEvents="none" style={StyleSheet.absoluteFillObject}>
+          <Animated.View
+            pointerEvents="none"
+            style={[
+              StyleSheet.absoluteFillObject,
+              { opacity: flashAnim, backgroundColor: flashColor },
+            ]}
+          />
+        </View>
+      )}
     </View>
   );
 }

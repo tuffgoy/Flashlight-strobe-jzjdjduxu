@@ -123,78 +123,35 @@ function isBelowMin(current: string, min: string): boolean {
 }
 
 // ── Full-screen flash overlay ─────────────────────────────────────────────────
-// Only mounted while fullscreen strobe is actively running — prevents the
-// startup crash from a permanently-mounted transparent Modal.
+// Rendered as the LAST child of FullscreenFlashProvider — after
+// GestureHandlerRootView — so it sits above the entire navigation stack and
+// tab bar without needing a Modal.
+//
+// Both wrapper and animated view have pointerEvents="none", so every touch
+// (scroll gesture, button press, slider drag) falls through to the UI below.
+// The strobe is stopped ONLY by the on/off button — never by tapping the screen.
+//
+// Only mounted while isFullscreenActive is true (avoids a startup crash on
+// some Android versions from a permanently-mounted absolute overlay).
 
 function FullscreenFlashOverlay() {
-  const { flashAnim, isFullscreenActive, flashColor, callStop } = useFullscreenFlash();
+  const { flashAnim, isFullscreenActive, flashColor } = useFullscreenFlash();
   if (!isFullscreenActive) return null;
   return (
-    <Modal
-      visible
-      transparent
-      statusBarTranslucent
-      animationType="none"
-      hardwareAccelerated
+    <View
+      pointerEvents="none"
+      style={[StyleSheet.absoluteFillObject, { zIndex: 9999 }]}
     >
-      {/*
-       * Touch detection strategy:
-       *   1. The root View uses the low-level responder system
-       *      (onStartShouldSetResponder + onResponderGrant) which is the most
-       *      reliable way to catch touches in an Android Modal — it bypasses
-       *      Pressable's internal delay and RNGH conflicts.
-       *   2. The flash Animated.View has pointerEvents="none" so it never
-       *      absorbs touches.
-       *   3. A permanently-visible stop button at the bottom provides a clear
-       *      tap target even when the flash is at full brightness.
-       */}
-      <View
-        style={StyleSheet.absoluteFillObject}
-        onStartShouldSetResponder={() => true}
-        onResponderGrant={callStop}
-      >
-        <Animated.View
-          pointerEvents="none"
-          style={[
-            StyleSheet.absoluteFillObject,
-            { backgroundColor: flashColor, opacity: flashAnim },
-          ]}
-        />
-
-        {/* Stop button — always visible regardless of flash state */}
-        <View pointerEvents="none" style={ovl.stopWrap}>
-          <View style={ovl.stopBtn}>
-            <Text style={ovl.stopBtnText}>■  TAP ANYWHERE TO STOP</Text>
-          </View>
-        </View>
-      </View>
-    </Modal>
+      <Animated.View
+        pointerEvents="none"
+        style={[
+          StyleSheet.absoluteFillObject,
+          { backgroundColor: flashColor, opacity: flashAnim },
+        ]}
+      />
+    </View>
   );
 }
-
-const ovl = StyleSheet.create({
-  stopWrap: {
-    position: "absolute",
-    bottom: 60,
-    left: 0,
-    right: 0,
-    alignItems: "center",
-  },
-  stopBtn: {
-    backgroundColor: "rgba(0,0,0,0.70)",
-    borderRadius: 24,
-    paddingHorizontal: 28,
-    paddingVertical: 14,
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.15)",
-  },
-  stopBtnText: {
-    color: "#fff",
-    fontSize: 14,
-    fontFamily: "Inter_700Bold",
-    letterSpacing: 1.5,
-  },
-});
 
 // ── Blocking minimum-version dialog ──────────────────────────────────────────
 
